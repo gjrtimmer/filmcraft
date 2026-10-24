@@ -318,7 +318,11 @@ pub(crate) fn factory_with(
     // H.264 falls through to the software encoder; H.265 has none, so a request nvmpi cannot take is an error
     let declined = |why: &str| {
         log::info!("nvmpi encoding declined: {why}");
-        filmcraft_export::note_hw_encode_declined();
+        // an H.264 request goes on to NVENC (registered behind this factory on Linux), which counts the
+        // decline itself or takes it: one request counts at most once
+        if hevc || !filmcraft_export::encoder_registered(crate::nvenc::export::factory) {
+            filmcraft_export::note_hw_encode_declined();
+        }
         if hevc { Some(Err(ExportError::Unsupported(format!("H.265 export with nvmpi: {why}")))) } else { None }
     };
     let p = match params(format, w, h, rate, s) {
