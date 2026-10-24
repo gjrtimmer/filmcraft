@@ -105,6 +105,18 @@ impl DecBackend for HwDecoder {
         if rc < 0 { Err(rc) } else { Ok(()) }
     }
 
+    fn put_eos(&mut self) -> Result<(), i32> {
+        if self.ctx.is_null() {
+            return Err(NVMPI_ERR_INVAL);
+        }
+        // payload_size 0 is the marker; the payload pointer is never read but stays valid
+        let mut packet = nvPacket { flags: 0, payload_size: 0, payload: [0u8; 1].as_ptr().cast_mut(), pts: 0, privData: ptr::null_mut() };
+        // SAFETY: `ctx` is a live decoder handle; `packet` is valid for the whole call, which reads
+        // no payload byte for a zero-sized packet and keeps nothing.
+        let rc = unsafe { (self.api.decoder_put_packet)(self.ctx, &mut packet) };
+        if rc < 0 { Err(rc) } else { Ok(()) }
+    }
+
     fn get_frame(&mut self, buf: &mut PlaneBuf, wait: bool) -> DecOut {
         let (Ok(stride), Ok(luma_len), Ok(chroma_len)) = (c_uint::try_from(buf.stride), c_ulong::try_from(buf.luma.len()), c_ulong::try_from(buf.chroma.len()))
         else {
@@ -135,7 +147,7 @@ impl DecBackend for HwDecoder {
         }
     }
 
-    fn flush(&mut self) {
+    fn reopen(&mut self) {
         // A new session, not `nvmpi_decoder_flush`: on the Orin (L4T R36.4, libnvmpi 4.6.5) a flushed
         // session never signals the stream's resolution again, so it returns no picture, its input
         // buffers fill and the next `put_packet` blocks for good. If the new session cannot be opened

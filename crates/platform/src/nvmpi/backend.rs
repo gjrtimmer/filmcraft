@@ -40,12 +40,16 @@ pub trait DecBackend: Send {
     /// Queue one Annex B access unit (never an empty one: that is the library's end-of-stream
     /// marker). `Err` is the library's negative code.
     fn put_packet(&mut self, annex_b: &[u8], pts: i64) -> Result<(), i32>;
+    /// Queue the end-of-stream marker: the session then gives up the pictures it holds and is
+    /// finished (only [`DecBackend::reopen`] makes it take packets again). `Err` is the library's
+    /// negative code.
+    fn put_eos(&mut self) -> Result<(), i32>;
     /// Copy the next picture, in presentation order, into `buf`; `wait` blocks for up to the
     /// session's wait timeout.
     fn get_frame(&mut self, buf: &mut PlaneBuf, wait: bool) -> DecOut;
-    /// Reset the pipeline for a seek: in-flight pictures are discarded and the next packet must
-    /// bring the parameter sets again (libnvmpi's: a new session, see `session_dec`).
-    fn flush(&mut self);
+    /// Close the session and open a new one (a seek, or after end of stream): in-flight pictures are
+    /// discarded and the next packet must bring the parameter sets again.
+    fn reopen(&mut self);
 }
 
 /// What an encoder session is created with. Frames go in as planar 4:2:0 (8-bit).

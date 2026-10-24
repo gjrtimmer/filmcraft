@@ -17,7 +17,9 @@ use super::dec::{INPUT_SLOTS, NvmpiDecoder, STALL_POLLS, takes};
 struct Log {
     puts: Vec<Vec<u8>>,
     waits: Vec<bool>,
-    flushes: usize,
+    /// Sessions replaced by a new one.
+    reopens: usize,
+    eos: usize,
     /// The session counter when the backend was dropped.
     counter_at_drop: Option<usize>,
 }
@@ -112,8 +114,18 @@ impl DecBackend for Mock {
         DecOut::Frame { width, height, pts }
     }
 
-    fn flush(&mut self) {
-        self.log.lock().unwrap().flushes += 1;
+    fn put_eos(&mut self) -> Result<(), i32> {
+        self.log.lock().unwrap().eos += 1;
+        assert!(self.pending.len() < 10, "put_packet would block forever");
+        // a libnvmpi with the jetson-nvmpi #16 fix: every held picture comes out after the marker
+        if !self.stuck {
+            self.ready.extend(self.pending.drain(..));
+        }
+        Ok(())
+    }
+
+    fn reopen(&mut self) {
+        self.log.lock().unwrap().reopens += 1;
         self.pending.clear();
         self.ready.clear();
     }
@@ -158,6 +170,12 @@ fn hevc(size: (u32, u32), bits: u32) -> NalStreamInfo {
 /// An H.264 IDR slice (nal_ref_idc 3, type 5) as a length-prefixed sample.
 const IDR: [u8; 6] = [0, 0, 0, 2, 0x65, 9];
 
+/// End-of-stream markers sent and sessions reopened.
+fn counts(log: &Mutex<Log>) -> (usize, usize) {
+    let l = log.lock().unwrap();
+    (l.eos, l.reopens)
+}
+
 fn decoder(info: NalStreamInfo, mock: Mock) -> NvmpiDecoder {
     NvmpiDecoder::with_backend(info, Box::new(mock), None).expect("decoder")
 }
@@ -190,21 +208,23 @@ fn pictures_come_out_in_order_with_their_timestamps_and_planes() {
 }
 
 #[test]
-fn flush_restarts_the_pipeline_and_the_next_packet_brings_the_headers_again() {
+fn flush_ends_the_stream_and_continues_in_a_new_session() {
     let (mock, log) = Mock::new((4, 2), 3);
     let mut d = decoder(h264((4, 2), 3), mock);
     for k in 0..3i64 {
         assert!(d.decode(&IDR, k).unwrap().is_empty());
     }
+    // the end-of-stream marker gives up every held picture; the finished session is replaced
     assert_eq!(pts_of(&d.flush()), [0, 1, 2]);
-    assert_eq!(log.lock().unwrap().flushes, 1);
+    assert_eq!(counts(&log), (1, 1));
     d.decode(&IDR, 10).unwrap();
     let puts = log.lock().unwrap().puts.clone();
     assert_eq!(puts[3][4], 0x67, "parameter sets come first after a flush");
-    // reset forgets what was in flight and restarts too
+    // a seek forgets what was in flight and replaces the session without the marker
     d.reset();
-    assert_eq!(log.lock().unwrap().flushes, 2);
+    assert_eq!(counts(&log), (1, 2));
     assert!(d.flush().is_empty(), "nothing in flight after a reset");
+    assert_eq!(log.lock().unwrap().eos, 1, "no marker for a session that was not fed");
     d.decode(&IDR, 11).unwrap();
     assert_eq!(log.lock().unwrap().puts[4][4], 0x67);
 }
@@ -329,18 +349,17 @@ fn what_nvmpi_does_not_decode_is_declined_up_front() {
 }
 
 #[test]
-fn a_session_that_was_never_fed_is_not_flushed() {
+fn a_session_that_was_never_fed_is_not_restarted() {
     let (mock, log) = Mock::new((4, 2), 0);
     let mut d = decoder(h264((4, 2), 0), mock);
-    // the frame cache resets a new decoder before its first sample: libnvmpi's flush then would
-    // leave the Tegra decoder unable to start
+    // the frame cache resets a new decoder before its first sample: no new session for that
     d.reset();
     assert!(d.flush().is_empty());
-    assert_eq!(log.lock().unwrap().flushes, 0);
+    assert_eq!(counts(&log), (0, 0));
     assert_eq!(d.decode(&IDR, 1).unwrap().len(), 1);
     d.reset();
     d.reset();
-    assert_eq!(log.lock().unwrap().flushes, 1, "one flush per fed run");
+    assert_eq!(log.lock().unwrap().reopens, 1, "one new session per fed run");
 }
 
 #[test]

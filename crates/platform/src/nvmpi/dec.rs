@@ -3,8 +3,11 @@
 //!
 //! libnvmpi decodes on its own capture thread, so a picture is rarely ready right after its packet:
 //! [`NvmpiDecoder::decode`] returns what is ready, waits (briefly) only when the hardware lags far
-//! behind the stream's reorder depth, and [`NvmpiDecoder::flush`] waits for the rest. The empty packet
-//! libnvmpi uses as end-of-stream marker is never sent (it discards the pictures still in flight).
+//! behind the stream's reorder depth, and [`NvmpiDecoder::flush`] sends the end-of-stream marker and
+//! waits for the rest; the finished session is then replaced by a new one. A seek
+//! ([`VideoDecoder::reset`]) replaces the session without the marker. libnvmpi 4.6.5 stops its
+//! capture thread at the marker and drops the pictures it still holds for reordering (the last 2-4
+//! of a stream; jetson-nvmpi GitLab #16): those are lost until a libnvmpi with the fix is installed.
 //!
 //! No call blocks without bound. libnvmpi's `put_packet` waits with no timeout for a free input
 //! buffer once all of them are queued, so a packet goes in only while fewer than [`INPUT_SLOTS`]
@@ -30,8 +33,9 @@ const MAX_SIDE: u32 = 8192;
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 /// Pictures the hardware may lag behind `reorder` before a call waits for one.
 const LAG_SLACK: usize = 2;
-/// Consecutive empty waits (each up to the session's wait timeout) that end a flush.
-const FLUSH_IDLE_POLLS: u32 = 20;
+/// Consecutive empty waits (each up to the session's wait timeout, 50 ms) that end the drain after the
+/// end-of-stream marker: not the first one, as the hardware may still be finishing a picture.
+const FLUSH_IDLE_POLLS: u32 = 6;
 /// Unanswered packets at which a packet waits for a picture before it goes in: libnvmpi queues input
 /// in 10 buffers and blocks for good on the 11th packet while the hardware holds all 10. A packet
 /// still in the hardware has not produced its picture, so at most `in_flight` buffers are held.
@@ -134,11 +138,12 @@ impl NvmpiDecoder {
         Ok(Self { backend, info, name, buf, size, bits, primed: false, skip_rasl: false, in_flight: 0, fed: false, _permit: permit })
     }
 
-    /// Start the pipeline over: the next packet brings the parameter sets again. A session that has
-    /// not been fed is left alone (see `fed`).
+    /// Start the pipeline over with a new session: the next packet brings the parameter sets again.
+    /// Required after the end-of-stream marker (the session is finished) and on a seek. A session
+    /// that has not been fed is left alone (see `fed`).
     fn restart(&mut self) {
         if self.fed {
-            self.backend.flush();
+            self.backend.reopen();
         }
         self.fed = false;
         self.primed = false;
@@ -164,6 +169,36 @@ impl NvmpiDecoder {
             }
         }
         Ok(())
+    }
+
+    /// End of stream: send the marker (after making room for it: it takes an input buffer like any
+    /// packet) and collect the pictures the session gives up, until it has answered every packet or
+    /// stays empty for [`FLUSH_IDLE_POLLS`] waits. The session is finished afterwards.
+    fn drain(&mut self, out: &mut Vec<DecodedFrame>) {
+        if let Err(e) = self.make_room(out) {
+            log::warn!("{e} at the end of the stream");
+            return;
+        }
+        if let Err(code) = self.backend.put_eos() {
+            log::warn!("{}: libnvmpi refused the end of stream ({code})", self.name);
+            return;
+        }
+        let mut idle = 0;
+        while self.in_flight > 0 && idle < FLUSH_IDLE_POLLS {
+            match self.poll(out, true) {
+                Ok(true) => idle = 0,
+                Ok(false) => idle += 1,
+                // a library that reports the end of the stream as a code ends the drain the same way
+                Err(e) => {
+                    log::info!("{e} after the end of the stream");
+                    break;
+                }
+            }
+        }
+        if self.in_flight > 0 {
+            // libnvmpi 4.6.5 drops the pictures held for reordering at the marker (jetson-nvmpi GitLab #16)
+            log::info!("{}: {} pictures did not come out at the end of the stream", self.name, self.in_flight);
+        }
     }
 
     /// Ask the session for one picture and, when there is one, append it to `out`. `Ok(true)`: a picture.
@@ -221,16 +256,8 @@ impl VideoDecoder for NvmpiDecoder {
 
     fn flush(&mut self) -> Vec<DecodedFrame> {
         let mut out = Vec::new();
-        let mut idle = 0;
-        while self.in_flight > 0 && idle < FLUSH_IDLE_POLLS {
-            match self.poll(&mut out, true) {
-                Ok(true) => idle = 0,
-                Ok(false) => idle += 1,
-                Err(e) => {
-                    log::warn!("{}: {e} while flushing", self.name);
-                    break;
-                }
-            }
+        if self.fed {
+            self.drain(&mut out);
         }
         self.restart();
         out
