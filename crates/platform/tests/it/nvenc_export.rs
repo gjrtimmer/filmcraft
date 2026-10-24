@@ -137,6 +137,9 @@ fn what_nvenc_does_not_take_goes_to_the_software_encoder() {
     );
     // an odd frame size is rounded to even by the pipeline, so NVENC still takes it
     let hardware_available = filmcraft_platform::nvenc::available();
+    // on a Jetson, nvmpi sits in front of NVENC and takes it
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    let hardware_available = hardware_available || filmcraft_platform::nvmpi::probe().is_ok();
     let odd = run("odd.mp4", &|s| s.frame_size = Some((641, 359)));
     assert_eq!(odd, if hardware_available { (24, 0) } else { (0, 1) });
     // Off never touches the hardware encoder
