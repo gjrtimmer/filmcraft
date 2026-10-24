@@ -97,9 +97,12 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   library and opens no session (the Tegra V4L2 driver crashes on concurrent sessions and on rapid open / close).
   Decode takes H.264 8-bit and HEVC 8- / 10-bit (P010), 4:2:0 progressive, and copies NV12 / P010 pictures through the CPU
   into the same planes as the other backends (no zero-copy path to the GPU compositor). libnvmpi decodes on its own thread:
-  a call returns the pictures that are ready, waits (30 ms) only when the hardware lags far behind the reorder depth, and
-  `flush` waits for the rest; the empty packet that is the library's end-of-stream marker is never sent (it discards the
-  pictures in flight). Encode (Export ▸ Hardware encoding for H.264, and the H.265 format) writes 8-bit 4:2:0 SDR BT.709
+  a call returns the pictures that are ready, waits (50 ms, the library's shortest) only when the hardware lags far behind
+  the reorder depth, and `flush` waits for the rest; the empty packet that is the library's end-of-stream marker is never
+  sent (it discards the pictures in flight). No call blocks without bound: a packet goes in only while fewer than 9 of the
+  library's 10 input buffers can be in use (else it waits for pictures), and a decoder that returns none for 2 s is an
+  error, which the hybrid decoder continues in software. A seek opens a new session instead of `nvmpi_decoder_flush`
+  (a flushed session never starts again on L4T R36.4), and a session that was not fed is not restarted. Encode (Export ▸ Hardware encoding for H.264, and the H.265 format) writes 8-bit 4:2:0 SDR BT.709
   without B-frames, takes its `avcC` / `hvcC` from the first access unit and is refused for CRF, two-pass, HDR, interlaced,
   non-square pixels and odd sizes. A global session cap (`nvmpi/cap.rs`) allows 2 decoders and 1 encoder at a time
   (`FILMCRAFT_NVMPI_MAX_SESSIONS` sets the decoder limit); background work (thumbnails), streams nvmpi does not take and

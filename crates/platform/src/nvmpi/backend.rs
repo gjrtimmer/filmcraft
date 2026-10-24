@@ -44,7 +44,7 @@ pub trait DecBackend: Send {
     /// session's wait timeout.
     fn get_frame(&mut self, buf: &mut PlaneBuf, wait: bool) -> DecOut;
     /// Reset the pipeline for a seek: in-flight pictures are discarded and the next packet must
-    /// bring the parameter sets again.
+    /// bring the parameter sets again (libnvmpi's: a new session, see `session_dec`).
     fn flush(&mut self);
 }
 

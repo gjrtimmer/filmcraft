@@ -11,7 +11,7 @@ use filmcraft_frame::PixelData;
 
 use super::backend::{DecBackend, DecOut, PlaneBuf};
 use super::cap::try_take;
-use super::dec::{NvmpiDecoder, takes};
+use super::dec::{INPUT_SLOTS, NvmpiDecoder, STALL_POLLS, takes};
 
 #[derive(Default)]
 struct Log {
@@ -34,6 +34,8 @@ struct Mock {
     put_error: Option<i32>,
     get_error: Option<i32>,
     counter: Option<&'static AtomicUsize>,
+    /// A hardware decoder that never starts: a blocking wait finishes no picture.
+    stuck: bool,
 }
 
 impl Mock {
@@ -50,6 +52,7 @@ impl Mock {
             put_error: None,
             get_error: None,
             counter: None,
+            stuck: false,
         };
         (m, log)
     }
@@ -61,6 +64,8 @@ impl DecBackend for Mock {
         if let Some(code) = self.put_error {
             return Err(code);
         }
+        // libnvmpi has 10 input buffers and waits for good for one the hardware has not given back
+        assert!(self.pending.len() < 10, "put_packet would block forever");
         self.pending.push_back(pts);
         while self.pending.len() > self.latency {
             let p = self.pending.pop_front().unwrap();
@@ -74,7 +79,7 @@ impl DecBackend for Mock {
         if let Some(code) = self.get_error {
             return DecOut::Failed(code);
         }
-        if self.ready.is_empty() && wait {
+        if self.ready.is_empty() && wait && !self.stuck {
             // a blocking wait gives the hardware time to finish its oldest picture
             if let Some(p) = self.pending.pop_front() {
                 self.ready.push_back(p);
@@ -321,4 +326,46 @@ fn what_nvmpi_does_not_decode_is_declined_up_front() {
     i.interlaced = true;
     assert!(NvmpiDecoder::new(i).is_err());
     assert_eq!(super::cap::in_use(super::cap::Kind::Decoder), before);
+}
+
+#[test]
+fn a_session_that_was_never_fed_is_not_flushed() {
+    let (mock, log) = Mock::new((4, 2), 0);
+    let mut d = decoder(h264((4, 2), 0), mock);
+    // the frame cache resets a new decoder before its first sample: libnvmpi's flush then would
+    // leave the Tegra decoder unable to start
+    d.reset();
+    assert!(d.flush().is_empty());
+    assert_eq!(log.lock().unwrap().flushes, 0);
+    assert_eq!(d.decode(&IDR, 1).unwrap().len(), 1);
+    d.reset();
+    d.reset();
+    assert_eq!(log.lock().unwrap().flushes, 1, "one flush per fed run");
+}
+
+#[test]
+fn a_hardware_decoder_that_never_starts_is_an_error_not_a_hang() {
+    let (mut mock, log) = Mock::new((4, 2), usize::MAX);
+    mock.stuck = true;
+    let mut d = decoder(h264((4, 2), 2), mock);
+    let failed = (0..50i64).find_map(|k| d.decode(&IDR, k).err());
+    assert!(matches!(failed, Some(CodecError::Decode(m)) if m.contains("stalled")));
+    let log = log.lock().unwrap();
+    assert_eq!(log.puts.len(), INPUT_SLOTS, "the input queue is never filled");
+    let waits = log.waits.iter().filter(|w| **w).count();
+    assert!((STALL_POLLS as usize..=STALL_POLLS as usize + INPUT_SLOTS).contains(&waits), "{waits} waits");
+}
+
+#[test]
+fn a_lagging_hardware_decoder_is_waited_for_before_its_input_fills() {
+    // pictures come out only on a blocking wait: every packet past the input bound waits for one
+    let (mock, log) = Mock::new((4, 2), usize::MAX);
+    let mut d = decoder(h264((4, 2), 2), mock);
+    let mut got = Vec::new();
+    for k in 0..30i64 {
+        got.extend(d.decode(&IDR, k).unwrap());
+    }
+    got.extend(d.flush());
+    assert_eq!(pts_of(&got), (0..30).collect::<Vec<_>>());
+    assert_eq!(log.lock().unwrap().puts.len(), 30);
 }
