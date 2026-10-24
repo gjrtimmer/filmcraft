@@ -90,6 +90,20 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   the parser and `Session` reach through the same pointer, freed in `Drop`. After a start at a CRA picture its RASL pictures are not fed (no
   decoder outputs them, and the parser would otherwise show the CRA picture with the last one's
   timestamp). A seek recreates the parser and keeps the decoder.
+- **Linux aarch64 (NVIDIA Jetson): libnvmpi, H.264 / HEVC decode and H.264 / HEVC encode** (`nvmpi/`), through the C library of
+  [jetson-nvmpi](https://github.com/gjrtimmer/jetson-nvmpi) (Tegra NVDEC / NVENC over V4L2); a Jetson has neither VA-API nor
+  NVDEC's CUDA path. `libnvmpi.so.1` (then `libnvmpi.so`) is loaded at run time and the declarations are those of `nvmpi.h`
+  v4.6.5 (`nvmpi/ffi.rs`, layout-tested in `abi_tests.rs`); without the library nothing is registered. The probe loads the
+  library and opens no session (the Tegra V4L2 driver crashes on concurrent sessions and on rapid open / close).
+  Decode takes H.264 8-bit and HEVC 8- / 10-bit (P010), 4:2:0 progressive, and copies NV12 / P010 pictures through the CPU
+  into the same planes as the other backends (no zero-copy path to the GPU compositor). libnvmpi decodes on its own thread:
+  a call returns the pictures that are ready, waits (30 ms) only when the hardware lags far behind the reorder depth, and
+  `flush` waits for the rest; the empty packet that is the library's end-of-stream marker is never sent (it discards the
+  pictures in flight). Encode (Export ▸ Hardware encoding for H.264, and the H.265 format) writes 8-bit 4:2:0 SDR BT.709
+  without B-frames, takes its `avcC` / `hvcC` from the first access unit and is refused for CRF, two-pass, HDR, interlaced,
+  non-square pixels and odd sizes. A global session cap (`nvmpi/cap.rs`) allows 2 decoders and 1 encoder at a time
+  (`FILMCRAFT_NVMPI_MAX_SESSIONS` sets the decoder limit); background work (thumbnails), streams nvmpi does not take and
+  requests over the cap go to the software decoders. `FILMCRAFT_NVMPI=0` turns the backend off.
 - **Linux: VA-API, H.264 (`avcC`) and HEVC (`hvcC`)**: H.264 8-bit 4:2:0 progressive, Constrained
   Baseline / Main / High; HEVC Main, Main 10 and Main Still Picture, 4:2:0 8- and 10-bit (`vaapi/`), on Intel (iHD, i965), AMD and other Mesa drivers. `libva.so.2` and `libva-drm.so.2`
   are loaded at run time (`vaapi/va.rs`; no libva headers needed to build), and each decoder opens
@@ -293,6 +307,7 @@ level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main
 | `tests/it/fallback.rs` (every OS) | `HybridDecoder` with a stand-in hardware decoder failing after N samples (every sync sample ± a few, first / last sample, after a seek): output identical to the software decoder; in-band parameter sets identical to the sample entry's stay in hardware, different ones switch to software |
 | `tests/setting.rs` | Hardware decoding Off gives the software decoder through `make_video_decoder` and the media stack (no hardware frames); Auto gives VideoToolbox where available |
 | `tests/it/hardware_encode.rs` (macOS) | what the hardware path takes and declines; round trip through our software decoder (every picture, in order, luma PSNR above 30 dB, keyframes no further apart than asked, no composition offsets); an export through `filmcraft_export` that decodes in our decoder and in ffmpeg / ffprobe (profile, size, frame count, BT.709); the built-in encoder still exporting everything hardware declines; exact output size at sizes that are not multiples of 16; hostile configurations (zero, huge, odd sizes, frame rates, bitrates, keyframe intervals, wrong planes) give errors and never panic; encoders dropped at any point do not crash or hang. The same for **HEVC**: Main profile, 8-bit 4:2:0, `hvc1` entry with VPS / SPS / PPS and 4-byte lengths, MP4 and QuickTime, AAC audio, two-pass refused, the format list agreeing with the probe, ffprobe reading `codec_name=hevc`, `profile=Main`, `codec_tag_string=hvc1`, `pix_fmt=yuv420p`, BT.709 |
+| `tests/nvmpi.rs` (Linux aarch64, Jetson with libnvmpi; skips otherwise) | H.264 High, HEVC Main (open GOP) and Main 10 decode bit-exact with our software decoder, also after `reset` + reseek; what nvmpi does not take (interlaced, 10-bit H.264, 4:2:2), background work and Hardware decoding Off are declined without a session; the session cap declines the third decoder and frees its slot on drop; H.264 and HEVC from nvmpi (1280×720, 6 Mbps, 72 frames) decode with our decoder in order at over 30 dB luma PSNR with a keyframe first and no composition offsets |
 | `tests/it/nvenc.rs` (Windows / Linux, NVIDIA) | H.264 from NVENC (1280×720, 6 Mbps, 72 frames) decodes with our decoder at worst 46.9 dB luma PSNR; IDR at 0, 24 and 48; dts / pts right |
 | `tests/it/nvenc_export.rs` (Windows / Linux; fallback also tested without NVIDIA) | Export with hardware encoding against the software encoder through the export pipeline: the two decoded files at worst 54.8 dB luma PSNR; ffmpeg decodes the file without errors; declined cases go to the software encoder; the counters |
 | `tests/it/nvenc_hevc.rs` (Windows, NVIDIA with HEVC) | HEVC from NVENC (1280×720, 6 Mbps, 72 frames, keyframe every 24) decodes with our HEVC decoder at worst 48.9 dB luma / 51.0 dB chroma PSNR; IDR at 0, 24, 48; dts strictly increasing, pts a permutation, `sps_max_num_reorder_pics` within the dts shift; no parameter sets in the samples; the `hvcC`'s profile / tier / level bytes are the SPS's own; VUI BT.709 limited and timing `(1, 24)`; hostile configurations, sizes, planes and encoders dropped mid-stream give errors, never panics; keyframes every 1–2 pictures without B-frames |
