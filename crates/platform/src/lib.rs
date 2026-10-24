@@ -141,6 +141,9 @@ pub fn register() -> Availability {
             Ok(library) => {
                 static NVMPI: std::sync::Once = std::sync::Once::new();
                 NVMPI.call_once(|| log::info!("hardware decoding through nvmpi: {library}"));
+                // Export ▸ Hardware encoding (H.264): in front of the software encoder (and of NVENC, which a
+                // Jetson does not have), taking an export only when asked for and when nvmpi can do it
+                filmcraft_export::register_encoder(nvmpi::enc::factory);
                 filmcraft_codecs::register_video_decoder(nvmpi_factory);
                 filmcraft_codecs::hw::set_hw_backend("nvmpi");
                 available = Availability::Available("nvmpi");

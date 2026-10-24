@@ -19,14 +19,19 @@
 pub mod backend;
 pub mod cap;
 pub mod dec;
+pub mod enc;
 pub mod ffi;
 #[allow(unsafe_code)]
 pub mod loader;
 #[allow(unsafe_code)]
 pub mod session_dec;
+#[allow(unsafe_code)]
+pub mod session_enc;
 
 #[cfg(test)]
 mod dec_tests;
+#[cfg(test)]
+mod enc_tests;
 
 #[cfg(test)]
 mod abi_tests;
