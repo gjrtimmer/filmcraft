@@ -99,8 +99,8 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   into the same planes as the other backends (no zero-copy path to the GPU compositor). libnvmpi decodes on its own thread:
   a call returns the pictures that are ready, waits (50 ms, the library's shortest) only when the hardware lags far behind
   the reorder depth, and `flush` sends the library's end-of-stream marker (an empty packet) and waits for the rest, then
-  replaces the finished session with a new one. libnvmpi 4.6.5 drops the last 2-4 pictures it holds for reordering at the
-  marker (jetson-nvmpi GitLab #16); a libnvmpi with that fix returns them. No call blocks without bound: a packet goes in only while fewer than 9 of the
+  replaces the finished session with a new one. libnvmpi before 4.6.6 drops the last 2-4 pictures it holds for reordering at the
+  marker (jetson-nvmpi #161 on GitHub); 4.6.6 returns them. No call blocks without bound: a packet goes in only while fewer than 9 of the
   library's 10 input buffers can be in use (else it waits for pictures), and a decoder that returns none for 2 s is an
   error, which the hybrid decoder continues in software. A seek opens a new session (no marker) instead of `nvmpi_decoder_flush`
   (a flushed session never starts again on L4T R36.4), and a session that was not fed is not restarted. Encode (Export ▸ Hardware encoding for H.264, and the H.265 format) writes 8-bit 4:2:0 SDR BT.709
