@@ -5,9 +5,9 @@
 //! [`NvmpiDecoder::decode`] returns what is ready, waits (briefly) only when the hardware lags far
 //! behind the stream's reorder depth, and [`NvmpiDecoder::flush`] sends the end-of-stream marker and
 //! waits for the rest; the finished session is then replaced by a new one. A seek
-//! ([`VideoDecoder::reset`]) replaces the session without the marker. libnvmpi 4.6.5 stops its
-//! capture thread at the marker and drops the pictures it still holds for reordering (the last 2-4
-//! of a stream; jetson-nvmpi GitLab #16): those are lost until a libnvmpi with the fix is installed.
+//! ([`VideoDecoder::reset`]) replaces the session without the marker. libnvmpi before 4.6.6 stops
+//! its capture thread at the marker and drops the pictures it still holds for reordering (the last
+//! 2-4 of a stream; jetson-nvmpi #161 on GitHub); 4.6.6 drains them.
 //!
 //! No call blocks without bound. libnvmpi's `put_packet` waits with no timeout for a free input
 //! buffer once all of them are queued, so a packet goes in only while fewer than [`INPUT_SLOTS`]
@@ -196,7 +196,7 @@ impl NvmpiDecoder {
             }
         }
         if self.in_flight > 0 {
-            // libnvmpi 4.6.5 drops the pictures held for reordering at the marker (jetson-nvmpi GitLab #16)
+            // libnvmpi before 4.6.6 drops the pictures held for reordering at the marker (jetson-nvmpi #161 on GitHub)
             log::info!("{}: {} pictures did not come out at the end of the stream", self.name, self.in_flight);
         }
     }
