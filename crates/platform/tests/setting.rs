@@ -4,6 +4,8 @@
 
 #[path = "it/common/mod.rs"]
 mod common;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod nvmpi_common;
 
 use common::*;
 use filmcraft_media::FrameRequest;
@@ -53,5 +55,13 @@ fn off_uses_the_software_decoder() {
         src.video_frame(FrameRequest::full(rate.tick_of(i))).unwrap();
     }
     let h2 = filmcraft_codecs::hw::hw_stats();
+    // the jetson-nvmpi mock (CI without a Jetson) reads no HEVC picture size: its pictures do not fit,
+    // and the hybrid decoder continues in software
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if nvmpi_common::on_mock() {
+        nvmpi_common::skipped_on_mock("hardware frames of an HEVC stream (the mock's pictures have the wrong size)");
+        assert!(h2.sessions > h1.sessions, "Auto: a hardware session {h1:?} → {h2:?}");
+        return;
+    }
     assert!(h2.frames > h1.frames && h2.sessions > h1.sessions, "Auto: hardware frames {h1:?} → {h2:?}");
 }
