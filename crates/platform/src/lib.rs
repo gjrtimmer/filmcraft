@@ -9,7 +9,7 @@
 //! Linux with none of them) registration does nothing and reports [`Availability::Unavailable`]. It also registers a
 //! hardware H.264 encoder factory (`filmcraft_export::register_encoder`) that only acts when an
 //! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`]; on
-//! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available, and on Windows
+//! macOS, on Windows (NVENC, [`nvenc`]) and on a Jetson (libnvmpi) it also makes the H.265 export format available, and on Windows
 //! (Main 10) lets HDR sequences export as HDR H.265.
 //!
 //! Hardware decoding never makes a file undecodable:
@@ -144,6 +144,10 @@ pub fn register() -> Availability {
                 // Export ▸ Hardware encoding (H.264): in front of the software encoder (and of NVENC, which a
                 // Jetson does not have), taking an export only when asked for and when nvmpi can do it
                 filmcraft_export::register_encoder(nvmpi::enc::factory);
+                // Export ▸ H.265: nvmpi is FilmCraft's only HEVC encoder on Linux, so the format is available
+                // when libnvmpi loads (the probe opens no session). It writes Main 8-bit SDR: no HDR probe, an HDR
+                // sequence is tone-mapped to SDR as before.
+                filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvmpi::enc::hevc_available);
                 filmcraft_codecs::register_video_decoder(nvmpi_factory);
                 filmcraft_codecs::hw::set_hw_backend("nvmpi");
                 available = Availability::Available("nvmpi");
