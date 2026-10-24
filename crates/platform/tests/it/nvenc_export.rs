@@ -74,6 +74,17 @@ fn settings(path: String, hw: HardwareEncoding) -> ExportSettings {
     }
 }
 
+/// Whether nvmpi runs on the jetson-nvmpi mock (CI without a Jetson), which decodes to gray pictures
+/// and codes P pictures as all-skip: the pictures of a hardware export are not compared there.
+fn nvmpi_mock() -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if crate::nvmpi_common::on_mock() {
+        crate::nvmpi_common::skipped_on_mock("the pictures of the hardware export against the software export's");
+        return true;
+    }
+    false
+}
+
 #[test]
 fn hardware_export_matches_the_software_export() {
     let _one = crate::common::NVENC_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -101,7 +112,7 @@ fn hardware_export_matches_the_software_export() {
     let (soft, hard) = (decode(&soft_path), decode(&hw_path));
     assert_eq!((soft.len(), hard.len()), (72, 72), "frame counts");
     let worst = soft.iter().zip(&hard).map(|(a, b)| luma_psnr(a, b)).fold(99.0, f64::min);
-    assert!(worst > 30.0, "hardware export differs from the software one: {worst:.1} dB");
+    assert!(nvmpi_mock() || worst > 30.0, "hardware export differs from the software one: {worst:.1} dB");
     let size = |p: &str| std::fs::metadata(p).unwrap().len();
     eprintln!("software {} bytes, hardware {} bytes, worst luma PSNR between them {worst:.1} dB", size(&soft_path), size(&hw_path));
 
