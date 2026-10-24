@@ -58,7 +58,7 @@ fn update(counter: &AtomicUsize, f: impl Fn(usize) -> Option<usize>) -> bool {
     }
 }
 
-fn try_take(counter: &'static AtomicUsize, limit: usize) -> Option<Permit> {
+pub(crate) fn try_take(counter: &'static AtomicUsize, limit: usize) -> Option<Permit> {
     // `then`, not `then_some`: a permit built for a refused take would give back a slot it never held
     update(counter, |n| (n < limit).then_some(n + 1)).then(|| Permit { counter })
 }
