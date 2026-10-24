@@ -11,17 +11,20 @@ use filmcraft_codecs::hw::NalCodec;
 
 /// Decoded pictures the library buffers before the caller must read (its own default).
 const FRAME_POOL: c_int = 5;
-/// How long a blocking `get_frame` waits for a picture, in milliseconds. Short on purpose: the
-/// decoder logic waits only when the hardware lags far behind, and a stall must stay small.
-pub const WAIT_MS: c_int = 30;
+/// How long a blocking `get_frame` waits for a picture, in milliseconds: libnvmpi's shortest
+/// (`[50, 5000]`; a value outside is replaced by its 500 ms default). Short on purpose: the decoder
+/// logic waits only when the hardware lags behind, and a stall must stay small.
+pub const WAIT_MS: c_int = 50;
 
 /// One open libnvmpi decoder.
 pub struct HwDecoder {
     api: &'static Api,
-    /// The session; null only after `drop` closed it.
+    /// The session; null after `drop` closed it, or when reopening it for a restart failed.
     ctx: *mut nvmpictx,
     /// The `NV_PIX_*` value the session was created for.
     pixel: c_int,
+    /// What the session was created with, to open it again on a restart.
+    params: DecParams,
 }
 
 // SAFETY: the `nvmpictx` is only reached through `&mut self`, so one thread at a time uses it
@@ -34,33 +37,50 @@ impl HwDecoder {
     /// busy, stream type unsupported).
     pub fn open(p: &DecParams) -> Result<Self, String> {
         let api = loader::api()?;
-        let (coding, pixel) = match (p.codec, p.ten_bit) {
-            (NalCodec::H264, false) => (NV_VIDEO_CodingH264, NV_PIX_NV12),
-            (NalCodec::Hevc, false) => (NV_VIDEO_CodingHEVC, NV_PIX_NV12),
-            (NalCodec::Hevc, true) => (NV_VIDEO_CodingHEVC, NV_PIX_P010),
-            (NalCodec::H264, true) => return Err("10-bit H.264 is not taken".into()),
-        };
-        let mut param = nvDecParam {
-            frame_pool_size: FRAME_POOL,
-            codingType: coding,
-            pixFormat: pixel,
-            resized: nvSize { width: 0, height: 0 },
-            // 0: the library's default (10 MiB); one access unit must fit
-            chunk_size: 0,
-            max_perf: 0,
-            disable_dpb: 0,
-            wait_timeout: WAIT_MS,
-            width: p.width,
-            height: p.height,
-        };
-        // SAFETY: `param` is a live, fully initialised `nvDecParam`; the library reads it once during
-        // the call and keeps no reference to it. The returned handle is owned by `Self` from here on.
-        let ctx = unsafe { (api.create_decoder)(&mut param) };
-        if ctx.is_null() {
-            return Err("libnvmpi could not create a decoder (no decoder device, the device is busy, or the stream is not supported)".into());
-        }
-        Ok(Self { api, ctx, pixel })
+        let (ctx, pixel) = create(api, p)?;
+        Ok(Self { api, ctx, pixel, params: *p })
     }
+
+    /// Close the session, once: the handle is nulled right after.
+    fn close(&mut self) {
+        if self.ctx.is_null() {
+            return;
+        }
+        // SAFETY: `ctx` is a live decoder handle owned by `self`; this is its single close (it is
+        // nulled right after, so it cannot be used or closed again).
+        let _ = unsafe { (self.api.decoder_close)(self.ctx) };
+        self.ctx = ptr::null_mut();
+    }
+}
+
+/// Create a libnvmpi decoder for `p`: the handle and the `NV_PIX_*` output format.
+fn create(api: &Api, p: &DecParams) -> Result<(*mut nvmpictx, c_int), String> {
+    let (coding, pixel) = match (p.codec, p.ten_bit) {
+        (NalCodec::H264, false) => (NV_VIDEO_CodingH264, NV_PIX_NV12),
+        (NalCodec::Hevc, false) => (NV_VIDEO_CodingHEVC, NV_PIX_NV12),
+        (NalCodec::Hevc, true) => (NV_VIDEO_CodingHEVC, NV_PIX_P010),
+        (NalCodec::H264, true) => return Err("10-bit H.264 is not taken".into()),
+    };
+    let mut param = nvDecParam {
+        frame_pool_size: FRAME_POOL,
+        codingType: coding,
+        pixFormat: pixel,
+        resized: nvSize { width: 0, height: 0 },
+        // 0: the library's default (10 MiB); one access unit must fit
+        chunk_size: 0,
+        max_perf: 0,
+        disable_dpb: 0,
+        wait_timeout: WAIT_MS,
+        width: p.width,
+        height: p.height,
+    };
+    // SAFETY: `param` is a live, fully initialised `nvDecParam`; the library reads it once during
+    // the call and keeps no reference to it. The returned handle is owned by the caller from here on.
+    let ctx = unsafe { (api.create_decoder)(&mut param) };
+    if ctx.is_null() {
+        return Err("libnvmpi could not create a decoder (no decoder device, the device is busy, or the stream is not supported)".into());
+    }
+    Ok((ctx, pixel))
 }
 
 impl DecBackend for HwDecoder {
@@ -116,23 +136,24 @@ impl DecBackend for HwDecoder {
     }
 
     fn flush(&mut self) {
-        if self.ctx.is_null() {
-            return;
+        // A new session, not `nvmpi_decoder_flush`: on the Orin (L4T R36.4, libnvmpi 4.6.5) a flushed
+        // session never signals the stream's resolution again, so it returns no picture, its input
+        // buffers fill and the next `put_packet` blocks for good. If the new session cannot be opened
+        // the handle stays null and every later call is refused (the hybrid decoder's cue to go on in
+        // software).
+        self.close();
+        match create(self.api, &self.params) {
+            Ok((ctx, pixel)) => {
+                self.ctx = ctx;
+                self.pixel = pixel;
+            }
+            Err(why) => log::warn!("nvmpi: the decoder session could not be reopened: {why}"),
         }
-        // SAFETY: `ctx` is a live decoder handle; the call stops and restarts the library's capture
-        // thread and discards in-flight pictures, and no other call is running (`&mut self`).
-        let _ = unsafe { (self.api.decoder_flush)(self.ctx) };
     }
 }
 
 impl Drop for HwDecoder {
     fn drop(&mut self) {
-        if self.ctx.is_null() {
-            return;
-        }
-        // SAFETY: `ctx` is a live decoder handle owned by `self`; this is its single close. The handle
-        // is nulled right after, so it cannot be used or closed again.
-        let _ = unsafe { (self.api.decoder_close)(self.ctx) };
-        self.ctx = ptr::null_mut();
+        self.close();
     }
 }

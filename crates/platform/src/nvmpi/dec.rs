@@ -6,6 +6,12 @@
 //! behind the stream's reorder depth, and [`NvmpiDecoder::flush`] waits for the rest. The empty packet
 //! libnvmpi uses as end-of-stream marker is never sent (it discards the pictures still in flight).
 //!
+//! No call blocks without bound. libnvmpi's `put_packet` waits with no timeout for a free input
+//! buffer once all of them are queued, so a packet goes in only while fewer than [`INPUT_SLOTS`]
+//! packets are unanswered; otherwise the decoder first waits for pictures, and a hardware decoder
+//! that returns none for [`STALL_POLLS`] waits (one that never starts, or stopped) is an error: the
+//! hybrid decoder's cue to continue in software.
+//!
 //! 8-bit H.264 and 8-/10-bit HEVC 4:2:0 progressive; everything else is declined for the software
 //! decoders. Timestamps go through the library bit for bit (`nvmpi.h` pts contract).
 
@@ -26,6 +32,13 @@ const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 const LAG_SLACK: usize = 2;
 /// Consecutive empty waits (each up to the session's wait timeout) that end a flush.
 const FLUSH_IDLE_POLLS: u32 = 20;
+/// Unanswered packets at which a packet waits for a picture before it goes in: libnvmpi queues input
+/// in 10 buffers and blocks for good on the 11th packet while the hardware holds all 10. A packet
+/// still in the hardware has not produced its picture, so at most `in_flight` buffers are held.
+pub(crate) const INPUT_SLOTS: usize = 9;
+/// Consecutive empty waits (each up to the session's wait timeout, 50 ms) with the input full after
+/// which the hardware decoder counts as stalled.
+pub(crate) const STALL_POLLS: u32 = 40;
 
 /// An nvmpi hardware decoder for one H.264 or HEVC stream.
 pub struct NvmpiDecoder {
@@ -43,6 +56,10 @@ pub struct NvmpiDecoder {
     skip_rasl: bool,
     /// Samples fed and not yet answered by a picture.
     in_flight: usize,
+    /// Whether the session was given a packet since it opened or last restarted. One that was not
+    /// needs no restart (a restart opens a new session, and the frame cache resets every new
+    /// decoder before its first sample: the Tegra driver dislikes rapid open / close).
+    fed: bool,
     /// Declared last: the session slot is given back only after the backend closed its session.
     _permit: Option<Permit>,
 }
@@ -114,7 +131,39 @@ impl NvmpiDecoder {
             NalCodec::Hevc => "nvmpi HEVC",
         };
         let buf = PlaneBuf { luma: zeroed(luma)?, chroma: zeroed(chroma)?, stride };
-        Ok(Self { backend, info, name, buf, size, bits, primed: false, skip_rasl: false, in_flight: 0, _permit: permit })
+        Ok(Self { backend, info, name, buf, size, bits, primed: false, skip_rasl: false, in_flight: 0, fed: false, _permit: permit })
+    }
+
+    /// Start the pipeline over: the next packet brings the parameter sets again. A session that has
+    /// not been fed is left alone (see `fed`).
+    fn restart(&mut self) {
+        if self.fed {
+            self.backend.flush();
+        }
+        self.fed = false;
+        self.primed = false;
+        self.skip_rasl = false;
+        self.in_flight = 0;
+    }
+
+    /// Wait for pictures (into `out`) until a packet can go in without libnvmpi blocking on a full
+    /// input queue. A stream whose reorder depth keeps more pictures in the hardware than that raises
+    /// the bound (its pictures come out only as packets go in). Errors when the hardware returns
+    /// nothing for [`STALL_POLLS`] waits in a row.
+    fn make_room(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
+        let limit = INPUT_SLOTS.max(self.info.reorder.saturating_add(LAG_SLACK).saturating_add(1));
+        let mut idle = 0;
+        while self.in_flight >= limit {
+            if self.poll(out, true)? {
+                idle = 0;
+                continue;
+            }
+            idle += 1;
+            if idle >= STALL_POLLS {
+                return Err(CodecError::Decode(format!("{}: no picture for {} packets, the hardware decoder has stalled", self.name, self.in_flight)));
+            }
+        }
+        Ok(())
     }
 
     /// Ask the session for one picture and, when there is one, append it to `out`. `Ok(true)`: a picture.
@@ -156,10 +205,12 @@ impl VideoDecoder for NvmpiDecoder {
         if data.len() > NVMPI_ENC_CHUNK_SIZE {
             return Err(CodecError::Decode(format!("{}: a {} byte access unit exceeds the input buffer", self.name, data.len())));
         }
+        let mut out = Vec::new();
+        self.make_room(&mut out)?;
         self.backend.put_packet(&data, pts).map_err(|code| CodecError::Decode(format!("{}: libnvmpi refused a packet ({code})", self.name)))?;
         self.primed = true;
+        self.fed = true;
         self.in_flight = self.in_flight.saturating_add(1);
-        let mut out = Vec::new();
         while self.poll(&mut out, false)? {}
         // far behind the stream's reorder depth: one short wait for the hardware to catch up
         if out.is_empty() && self.in_flight > self.info.reorder.saturating_add(LAG_SLACK) && self.poll(&mut out, true)? {
@@ -181,19 +232,12 @@ impl VideoDecoder for NvmpiDecoder {
                 }
             }
         }
-        // the pipeline starts over: the next packet brings the parameter sets again
-        self.backend.flush();
-        self.primed = false;
-        self.skip_rasl = false;
-        self.in_flight = 0;
+        self.restart();
         out
     }
 
     fn reset(&mut self) {
-        self.backend.flush();
-        self.primed = false;
-        self.skip_rasl = false;
-        self.in_flight = 0;
+        self.restart();
     }
 
     fn name(&self) -> &str {
