@@ -127,6 +127,8 @@ pub type CreateEncoder = unsafe extern "C" fn(*mut nvEncParam) -> *mut nvmpictx;
 pub type EncoderPutFrame = unsafe extern "C" fn(*mut nvmpictx, *mut nvFrame) -> c_int;
 /// `nvmpi_encoder_get_packet`.
 pub type EncoderGetPacket = unsafe extern "C" fn(*mut nvmpictx, *mut *mut nvPacket, bool) -> c_int;
+/// `nvmpi_encoder_dqEmptyPacket` (takes an empty packet back out of the pool; 0 while there is one).
+pub type EncoderDqEmptyPacket = unsafe extern "C" fn(*mut nvmpictx, *mut *mut nvPacket) -> c_int;
 /// `nvmpi_encoder_qEmptyPacket`.
 pub type EncoderQEmptyPacket = unsafe extern "C" fn(*mut nvmpictx, *mut nvPacket);
 /// `nvmpi_encoder_close`.
