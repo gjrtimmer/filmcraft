@@ -22,7 +22,7 @@ use filmcraft_codecs::VideoDecoder;
 use filmcraft_export::{EncoderFrame, ExportSettings, Format, HardwareEncoding};
 use filmcraft_frame::PixelData;
 use filmcraft_time::FrameRate;
-use nvmpi_common::{assert_close, on_mock, skipped_on_mock};
+use nvmpi_common::{assert_close, expect_exact, on_mock, skipped_on_mock};
 
 /// One test at a time: the Tegra V4L2 driver crashes on concurrent sessions.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -77,7 +77,10 @@ fn decodes_the_pictures_of_the_software_decoder() {
         let worst = assert_close(&name, &a, &sw_all, mock);
         assert!(hw.name().starts_with("nvmpi"), "{name}: stayed in hardware ({})", hw.name());
         if !mock {
-            eprintln!("{name}: worst PSNR against the software decoder: Y {:.1} dB, U {:.1} dB, V {:.1} dB", worst[0], worst[1], worst[2]);
+            let [y, u, v] = worst.psnr;
+            let [dy, du, dv] = worst.diff;
+            eprintln!("{name}: worst PSNR against the software decoder: Y {y:.1} dB, U {u:.1} dB, V {v:.1} dB");
+            eprintln!("{name}: max abs diff against the software decoder: Y {dy}, U {du}, V {dv} (exact pixels required: {})", expect_exact());
         }
         // reset + reseek to each later sync sample: the pictures from the seek point on must match
         // (pictures shown before an open-GOP I picture are concealed differently, RASL are dropped)

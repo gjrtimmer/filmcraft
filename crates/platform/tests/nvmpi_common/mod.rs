@@ -1,5 +1,5 @@
 //! Helpers of `tests/nvmpi.rs`: telling the libnvmpi mock from a Jetson, and comparing hardware
-//! pictures with the software decoder's within a tolerance.
+//! pictures with the software decoder's within a tolerance (or exactly, see [`EXPECT_EXACT_ENV`]).
 //!
 //! The mock (jetson-nvmpi `mock/`, used by CI runners without a Jetson) stands in for the Tegra
 //! V4L2 and NvBufSurface libraries under their real sonames, so the real libnvmpi runs on top of it.
@@ -41,6 +41,25 @@ pub fn skipped_on_mock(why: &str) {
     eprintln!("SKIPPED (mock): {why}");
 }
 
+/// Set to `1` when the libnvmpi under test is 4.10.1 or newer (jetson-nvmpi #163: decoder surfaces keep
+/// the stream's colorimetry and range, so decoded pictures are bit-exact with software decode). libnvmpi
+/// has no version API and `nvmpi_query_codec` / `nvmpi_get_caps` do not tell 4.10.1 from 4.10.0, so CI
+/// says so; unset, the PSNR tolerance of [`MIN_PSNR_DB`] applies.
+pub const EXPECT_EXACT_ENV: &str = "FILMCRAFT_NVMPI_EXPECT_EXACT";
+
+/// Whether `FILMCRAFT_NVMPI_EXPECT_EXACT=1` asks for exact pixels.
+pub fn expect_exact() -> bool {
+    std::env::var(EXPECT_EXACT_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// What [`assert_close`] measured, per plane Y / U / V.
+pub struct Worst {
+    /// Lowest PSNR in dB (99 on the mock).
+    pub psnr: [f64; 3],
+    /// Largest absolute sample difference (0 on the mock).
+    pub diff: [u32; 3],
+}
+
 /// Lowest PSNR (dB) a hardware picture may have against the software decoder's, per plane. The
 /// Tegra decoder output is not bit-exact today: libnvmpi's VIC copy colour-converts BT.709 and
 /// full-range pictures (up to ~50 luma levels on coloured pixels; jetson-nvmpi #163 on GitHub,
@@ -63,6 +82,18 @@ fn plane_psnr(x: &DecodedFrame, y: &DecodedFrame, i: usize) -> f64 {
     }
 }
 
+/// Largest absolute sample difference in plane `i` of two pictures of the same format and size.
+fn plane_max_diff(x: &DecodedFrame, y: &DecodedFrame, i: usize) -> u32 {
+    fn max_diff<T: Copy + Into<u32>>(a: &[T], b: &[T]) -> u32 {
+        a.iter().zip(b).map(|(p, q)| (*p).into().abs_diff((*q).into())).max().unwrap_or(0)
+    }
+    match (&x.frame.data, &y.frame.data) {
+        (PixelData::Yuv8 { planes: p, .. }, PixelData::Yuv8 { planes: q, .. }) => max_diff(&p[i], &q[i]),
+        (PixelData::Yuv16 { planes: p, .. }, PixelData::Yuv16 { planes: q, .. }) => max_diff(&p[i], &q[i]),
+        _ => panic!("pts {}: pixel formats differ", x.pts),
+    }
+}
+
 /// The pixel format of a picture: bit depth, chroma and plane sizes.
 fn layout(f: &DecodedFrame) -> String {
     match &f.frame.data {
@@ -77,15 +108,17 @@ fn layout(f: &DecodedFrame) -> String {
 /// jetson-nvmpi #161 on GitHub), size, aspect, colour and pixel format, and on a Jetson pixels within [`MIN_PSNR_DB`] per plane,
 /// each picture closer to its own software picture than to the neighbouring ones. On the mock (gray
 /// pictures in decode order) the timestamps are compared as a set and the pixels not at all.
-/// Returns the worst PSNR of each plane, Y / U / V (99 dB on the mock).
-pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: bool) -> [f64; 3] {
+/// With `FILMCRAFT_NVMPI_EXPECT_EXACT=1` the pixels must also be identical (largest difference 0 in
+/// every plane). Returns the worst PSNR and the largest difference of each plane (see [`Worst`]).
+pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: bool) -> Worst {
     let mut hw: Vec<&DecodedFrame> = hw.iter().collect();
     if mock {
         hw.sort_by_key(|f| f.pts);
     }
     let (pa, pb): (Vec<i64>, Vec<i64>) = (hw.iter().map(|f| f.pts).collect(), sw.iter().map(|f| f.pts).collect());
     assert_eq!(pa, pb, "{what}: pts sequence");
-    let mut worst = [99.0f64; 3];
+    let exact = expect_exact();
+    let mut worst = Worst { psnr: [99.0; 3], diff: [0; 3] };
     for (i, (x, y)) in hw.iter().zip(sw).enumerate() {
         let (fx, fy) = (&x.frame, &y.frame);
         assert_eq!((fx.width, fx.height, fx.par, fx.color), (fy.width, fy.height, fy.par, fy.color), "{what}: pts {} geometry / colour", x.pts);
@@ -93,10 +126,17 @@ pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: 
         if mock {
             continue;
         }
-        for (plane, low) in worst.iter_mut().enumerate() {
+        for plane in 0..3 {
             let db = plane_psnr(x, y, plane);
+            let diff = plane_max_diff(x, y, plane);
             assert!(db >= MIN_PSNR_DB, "{what}: pts {} plane {plane} at {db:.1} dB against the software decoder", x.pts);
-            *low = low.min(db);
+            assert!(
+                !exact || diff == 0,
+                "{what}: pts {} plane {plane} differs from the software decoder by up to {diff} ({EXPECT_EXACT_ENV}=1 wants exact pixels)",
+                x.pts
+            );
+            worst.psnr[plane] = worst.psnr[plane].min(db);
+            worst.diff[plane] = worst.diff[plane].max(diff);
         }
         let own = plane_psnr(x, y, 0);
         for n in [i.checked_sub(1), i.checked_add(1)].into_iter().flatten().filter_map(|n| sw.get(n)) {
