@@ -194,17 +194,34 @@ impl Drop for HwEncoder {
         if self.ctx.is_null() {
             return;
         }
-        // end the stream and take what is still in flight out of the library, as `close` expects
-        if !self.eos_sent {
+        // End the stream and read what is in flight (a finished export already did, and gets `Eos` at once).
+        // Packets read here belong to an export that was cancelled or failed: nobody wants them.
+        let finished = self.eos_sent;
+        if !finished {
             let _ = self.put_eos();
         }
+        let mut discarded = 0usize;
         let deadline = Instant::now() + DRAIN_LIMIT;
         while Instant::now() < deadline {
             match self.get_packet(true) {
-                EncOut::Packet(_) | EncOut::None => {}
+                EncOut::Packet(_) => discarded += 1,
+                EncOut::None => {}
                 EncOut::Eos | EncOut::Failed(_) => break,
             }
         }
+        if !finished || discarded > 0 {
+            log::debug!("nvmpi encoder closed (finished: {finished}): {discarded} encoded picture(s) discarded");
+        }
+        // `close` discards (and warns about) every packet still queued in the library's pool, and ours are
+        // all there (empty ones waiting, or handed back by `get_packet`): take them out first, empty pool
+        // before filled, as the FFmpeg wrapper does. The headers are ours and are freed below, so nothing
+        // is freed here; the encoder's dequeue thread has nothing in flight after end of stream.
+        let mut header: *mut nvPacket = ptr::null_mut();
+        // SAFETY: `ctx` is a live encoder handle and `header` a writable out-pointer; the pointers handed
+        // out are our own pool headers, which this code never dereferences.
+        while unsafe { (self.api.encoder_dq_empty_packet)(self.ctx, &mut header) } == 0 {}
+        // SAFETY: as above; `get_packet(.., false)` of the library only hands out our own headers too.
+        while unsafe { (self.api.encoder_get_packet)(self.ctx, &mut header, false) } == 0 {}
         // SAFETY: `ctx` is a live encoder handle owned by `self`; this is its single close, after which the
         // handle is nulled and never used again.
         let rc = unsafe { (self.api.encoder_close)(self.ctx) };

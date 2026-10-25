@@ -22,6 +22,7 @@ pub struct Api {
     pub create_encoder: CreateEncoder,
     pub encoder_put_frame: EncoderPutFrame,
     pub encoder_get_packet: EncoderGetPacket,
+    pub encoder_dq_empty_packet: EncoderDqEmptyPacket,
     pub encoder_q_empty_packet: EncoderQEmptyPacket,
     pub encoder_close: EncoderClose,
     /// Keeps the library mapped; never dropped (the `Api` lives in a static).
@@ -65,6 +66,7 @@ impl Api {
                 create_encoder: symbol(&library, b"nvmpi_create_encoder\0")?,
                 encoder_put_frame: symbol(&library, b"nvmpi_encoder_put_frame\0")?,
                 encoder_get_packet: symbol(&library, b"nvmpi_encoder_get_packet\0")?,
+                encoder_dq_empty_packet: symbol(&library, b"nvmpi_encoder_dqEmptyPacket\0")?,
                 encoder_q_empty_packet: symbol(&library, b"nvmpi_encoder_qEmptyPacket\0")?,
                 encoder_close: symbol(&library, b"nvmpi_encoder_close\0")?,
                 _library: library,
