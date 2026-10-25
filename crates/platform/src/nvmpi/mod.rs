@@ -31,6 +31,8 @@ pub mod session_enc;
 #[cfg(test)]
 mod dec_tests;
 #[cfg(test)]
+mod enc_drain_tests;
+#[cfg(test)]
 mod enc_tests;
 
 #[cfg(test)]

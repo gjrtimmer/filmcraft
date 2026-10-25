@@ -31,20 +31,22 @@ fn annex_b(nals: &[&[u8]]) -> Vec<u8> {
 }
 
 #[derive(Default)]
-struct Log {
+pub(super) struct Log {
     /// (plane sizes, strides, pts) of every accepted picture.
-    frames: Vec<([usize; 3], [u32; 3], i64)>,
+    pub(super) frames: Vec<([usize; 3], [u32; 3], i64)>,
     eagain_seen: usize,
-    eos: usize,
+    pub(super) eos: usize,
     counter_at_drop: Option<usize>,
 }
 
 /// A session that answers a picture with its access unit after `latency` further pictures, and
 /// refuses (`EAGAIN`) a picture while `capacity` are in flight.
-struct Mock {
+pub(super) struct Mock {
     log: Arc<Mutex<Log>>,
     header: Vec<u8>,
     idr: Vec<u8>,
+    /// The access unit of every picture after the first.
+    inter: Vec<u8>,
     latency: usize,
     capacity: usize,
     pending: VecDeque<EncPacket>,
@@ -64,12 +66,13 @@ fn h264_header() -> Vec<u8> {
 }
 
 impl Mock {
-    fn h264(latency: usize) -> (Self, Arc<Mutex<Log>>) {
+    pub(super) fn h264(latency: usize) -> (Self, Arc<Mutex<Log>>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let m = Mock {
             log: log.clone(),
             header: h264_header(),
             idr: annex_b(&[&[0x65, 0x88, 0x84, 0x21]]),
+            inter: annex_b(&[&[0x41, 0x9A, 0x01, 0x22]]),
             latency,
             capacity: 100,
             pending: VecDeque::new(),
@@ -86,10 +89,12 @@ impl Mock {
         (m, log)
     }
 
-    fn hevc(latency: usize) -> (Self, Arc<Mutex<Log>>) {
+    pub(super) fn hevc(latency: usize) -> (Self, Arc<Mutex<Log>>) {
         let (mut m, log) = Self::h264(latency);
         m.header = annex_b(&[&unhex(VPS), &unhex(SPS), &unhex(PPS)]);
         m.idr = annex_b(&[&[0x26, 0x01, 0xAF, 0x21]]);
+        // TRAIL_R slice (NAL type 1)
+        m.inter = annex_b(&[&[0x02, 0x01, 0xD0, 0x22]]);
         (m, log)
     }
 }
@@ -104,7 +109,7 @@ impl EncBackend for Mock {
             return NVMPI_ERR_EAGAIN;
         }
         self.log.lock().unwrap().frames.push(([planes[0].len(), planes[1].len(), planes[2].len()], strides, pts));
-        let data = if self.count == 0 { [self.header.clone(), self.idr.clone()].concat() } else { annex_b(&[&[0x41, 0x9A, 0x01, 0x22]]) };
+        let data = if self.count == 0 { [self.header.clone(), self.idr.clone()].concat() } else { self.inter.clone() };
         let stamp = if self.retime { pts + 1 } else { pts };
         self.pending.push_back(EncPacket { data, key: self.count == 0, pts: stamp });
         self.count += 1;
@@ -147,11 +152,11 @@ impl Drop for Mock {
     }
 }
 
-fn frame(w: u32, h: u32, index: u64, rgba: &[u8]) -> EncoderFrame<'_> {
+pub(super) fn frame(w: u32, h: u32, index: u64, rgba: &[u8]) -> EncoderFrame<'_> {
     EncoderFrame { width: w, height: h, rgba, hdr: None, index }
 }
 
-fn encoder(mock: Mock, codec: NalCodec, w: u32, h: u32) -> NvmpiEncoder {
+pub(super) fn encoder(mock: Mock, codec: NalCodec, w: u32, h: u32) -> NvmpiEncoder {
     NvmpiEncoder::with_backend(Box::new(mock), codec, w, h, FrameRate { num: 24000, den: 1001 }, None)
 }
 
