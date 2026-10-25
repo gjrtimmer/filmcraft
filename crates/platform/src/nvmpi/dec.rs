@@ -91,6 +91,13 @@ pub fn takes(info: &NalStreamInfo) -> std::result::Result<(), String> {
     plane_sizes((w, h), bits).map(|_| ())
 }
 
+/// [`takes`], and libnvmpi's own answer (`nvmpi_query_codec`, when the library has it) for the decoder
+/// session this stream needs: a definite "no" declines without opening a session.
+pub fn offered(info: &NalStreamInfo) -> std::result::Result<(), String> {
+    takes(info)?;
+    super::query::check(super::query::Key::decoder(info.codec, info.bit_depth_luma > 8))
+}
+
 /// Row stride and the luma and chroma plane sizes of a `size` picture at `bits`: both planes share the
 /// stride of the chroma row (`ceil(w / 2)` CbCr pairs), which is never below the luma row.
 fn plane_sizes(size: (u32, u32), bits: u32) -> std::result::Result<(usize, usize, usize), String> {
@@ -116,7 +123,7 @@ impl NvmpiDecoder {
     /// A decoder for the stream `info` describes, or why nvmpi does not take it on this system: the
     /// stream is not one it decodes, the session cap is reached, or libnvmpi cannot open a session.
     pub fn new(info: NalStreamInfo) -> std::result::Result<Self, String> {
-        takes(&info)?;
+        offered(&info)?;
         let permit = cap::acquire(Kind::Decoder).ok_or("the nvmpi decoder session limit is reached")?;
         let (width, height) = info.size();
         let ten_bit = info.bit_depth_luma > 8;

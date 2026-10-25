@@ -232,9 +232,9 @@ impl VideoEncoder for NvmpiEncoder {
     }
 }
 
-/// Whether nvmpi can write H.265 here: the library loads (no session is opened to find out).
+/// Whether nvmpi can write H.265 here: the library loads and does not rule HEVC encoding out (no session is opened to find out).
 pub fn hevc_available() -> bool {
-    super::probe().is_ok()
+    super::probe().is_ok() && super::query::check(super::query::Key::encoder(NalCodec::Hevc)).is_ok()
 }
 
 /// Why nvmpi does not take this export (the software encoder does, for H.264), or the session parameters.
@@ -296,6 +296,8 @@ type Opened = std::result::Result<(Box<dyn EncBackend>, Option<Permit>), String>
 /// The Export encoder factory (see the module documentation).
 pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
     factory_with(format, w, h, rate, s, |p| {
+        // a definite "no" from libnvmpi declines before the session cap and the driver are touched
+        super::query::check(super::query::Key::encoder(p.codec))?;
         let permit = cap::acquire(Kind::Encoder).ok_or("an nvmpi encoder is already open (the Tegra driver takes one session)")?;
         let session = super::session_enc::HwEncoder::open(p)?;
         Ok((Box::new(session) as Box<dyn EncBackend>, Some(permit)))

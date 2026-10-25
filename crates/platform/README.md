@@ -108,6 +108,14 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   non-square pixels and odd sizes. A global session cap (`nvmpi/cap.rs`) allows 2 decoders and 1 encoder at a time
   (`FILMCRAFT_NVMPI_MAX_SESSIONS` sets the decoder limit); background work (thumbnails), streams nvmpi does not take and
   requests over the cap go to the software decoders. `FILMCRAFT_NVMPI=0` turns the backend off.
+  With libnvmpi 4.10.0 or newer the codec probe asks `nvmpi_query_codec` (an optional symbol, `nvmpi/query.rs`) before any
+  session: a codec / direction / pixel layout the library build or the module cannot do (H.264 and HEVC 8-bit and HEVC 10-bit
+  decode, H.264 and HEVC encode) is declined without a trial session, and the H.265 format drops out of the list when HEVC
+  encoding is ruled out. An inconclusive answer (-1), an error, an older library without the symbol and a missing library all
+  mean "try as before"; definite answers are cached. With libnvmpi 4.10.1 or newer decoded pictures are bit-exact with the
+  software decoders (the decoder surfaces keep the stream's colorimetry and range, jetson-nvmpi #163 on GitHub); libnvmpi has
+  no version API, so `FILMCRAFT_NVMPI_EXPECT_EXACT=1` makes `tests/nvmpi.rs` require that. The CPU-copy path carries no
+  range flag (`nvmpi_decoder_get_frame2`): the picture's range comes from the stream's VUI, as for every backend.
 - **Linux: VA-API, H.264 (`avcC`) and HEVC (`hvcC`)**: H.264 8-bit 4:2:0 progressive, Constrained
   Baseline / Main / High; HEVC Main, Main 10 and Main Still Picture, 4:2:0 8- and 10-bit (`vaapi/`), on Intel (iHD, i965), AMD and other Mesa drivers. `libva.so.2` and `libva-drm.so.2`
   are loaded at run time (`vaapi/va.rs`; no libva headers needed to build), and each decoder opens
