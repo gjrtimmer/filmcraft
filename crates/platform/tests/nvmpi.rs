@@ -72,10 +72,12 @@ fn decodes_the_pictures_of_the_software_decoder() {
         let mut sw = software(&s);
         let a = decode_all(hw.as_mut(), &s.samples);
         assert!(a.len() >= 40, "{name}: {} pictures", a.len());
-        let worst = assert_close(&name, &a, &decode_all(sw.as_mut(), &s.samples), mock);
+        let sw_all = decode_all(sw.as_mut(), &s.samples);
+        eprintln!("{name}: pictures expected {} (software decoder), got {} (nvmpi)", sw_all.len(), a.len());
+        let worst = assert_close(&name, &a, &sw_all, mock);
         assert!(hw.name().starts_with("nvmpi"), "{name}: stayed in hardware ({})", hw.name());
         if !mock {
-            eprintln!("{name}: worst luma PSNR against the software decoder {worst:.1} dB");
+            eprintln!("{name}: worst PSNR against the software decoder: Y {:.1} dB, U {:.1} dB, V {:.1} dB", worst[0], worst[1], worst[2]);
         }
         // reset + reseek to each later sync sample: the pictures from the seek point on must match
         // (pictures shown before an open-GOP I picture are concealed differently, RASL are dropped)
@@ -176,6 +178,7 @@ fn one_encoder_at_a_time_and_a_closed_one_gives_its_slot_back() {
     assert!(open(Format::H264).is_none(), "a second H.264 export goes to the software encoder");
     // H.265 has no software encoder: over the limit it is an error that says why
     assert!(matches!(open(Format::Hevc), Some(Err(_))), "a second H.265 export is an error");
+    // dropped without a finish on purpose: the session drains and closes, and the slot comes back
     drop(first);
     assert!(matches!(open(Format::H264), Some(Ok(_))), "a closed encoder gives its slot back");
 }
@@ -223,8 +226,15 @@ fn round_trip(format: Format) {
         filmcraft_export::rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
         sources.push(y);
     }
+    // the packets that came out while encoding, then the ones only the end of the stream releases (the tail)
+    let during = packets.len();
     packets.extend(enc.flush().unwrap());
-    assert_eq!(packets.len(), frames, "{format:?}: one access unit per picture");
+    eprintln!(
+        "{format:?}: pictures submitted {frames}, packets expected {frames}, got {} ({during} while encoding + {} from the end of the stream)",
+        packets.len(),
+        packets.len() - during
+    );
+    assert_eq!(packets.len(), frames, "{format:?}: one access unit per picture (expected {frames}, got {})", packets.len());
     assert!(packets[0].key, "{format:?}: the first picture is a keyframe");
     assert!(packets.iter().all(|p| p.composition_offset == 0 && p.duration == 1), "{format:?}: no reordering");
     let entry = enc.sample_entry();
@@ -234,6 +244,7 @@ fn round_trip(format: Format) {
         out.extend(dec.decode(&p.data, i as i64).unwrap_or_else(|e| panic!("{format:?} sample {i}: {e}")));
     }
     out.extend(dec.flush());
+    eprintln!("{format:?}: pictures expected {frames}, decoded {}", out.len());
     assert_eq!(out.iter().map(|f| f.pts).collect::<Vec<_>>(), (0..frames as i64).collect::<Vec<_>>(), "{format:?}: pictures in order");
     // the mock codes P pictures as all-skip (they repeat the last keyframe); its keyframes carry the picture
     let mock = on_mock();

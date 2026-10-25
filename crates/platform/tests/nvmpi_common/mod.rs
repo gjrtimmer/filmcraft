@@ -77,15 +77,15 @@ fn layout(f: &DecodedFrame) -> String {
 /// jetson-nvmpi #161 on GitHub), size, aspect, colour and pixel format, and on a Jetson pixels within [`MIN_PSNR_DB`] per plane,
 /// each picture closer to its own software picture than to the neighbouring ones. On the mock (gray
 /// pictures in decode order) the timestamps are compared as a set and the pixels not at all.
-/// Returns the worst luma PSNR (99 dB on the mock).
-pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: bool) -> f64 {
+/// Returns the worst PSNR of each plane, Y / U / V (99 dB on the mock).
+pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: bool) -> [f64; 3] {
     let mut hw: Vec<&DecodedFrame> = hw.iter().collect();
     if mock {
         hw.sort_by_key(|f| f.pts);
     }
     let (pa, pb): (Vec<i64>, Vec<i64>) = (hw.iter().map(|f| f.pts).collect(), sw.iter().map(|f| f.pts).collect());
     assert_eq!(pa, pb, "{what}: pts sequence");
-    let mut worst = 99.0f64;
+    let mut worst = [99.0f64; 3];
     for (i, (x, y)) in hw.iter().zip(sw).enumerate() {
         let (fx, fy) = (&x.frame, &y.frame);
         assert_eq!((fx.width, fx.height, fx.par, fx.color), (fy.width, fy.height, fy.par, fy.color), "{what}: pts {} geometry / colour", x.pts);
@@ -93,16 +93,16 @@ pub fn assert_close(what: &str, hw: &[DecodedFrame], sw: &[DecodedFrame], mock: 
         if mock {
             continue;
         }
-        for plane in 0..3 {
+        for (plane, low) in worst.iter_mut().enumerate() {
             let db = plane_psnr(x, y, plane);
             assert!(db >= MIN_PSNR_DB, "{what}: pts {} plane {plane} at {db:.1} dB against the software decoder", x.pts);
+            *low = low.min(db);
         }
         let own = plane_psnr(x, y, 0);
         for n in [i.checked_sub(1), i.checked_add(1)].into_iter().flatten().filter_map(|n| sw.get(n)) {
             let other = plane_psnr(x, n, 0);
             assert!(own >= other, "{what}: pts {} is closer to software pts {} ({other:.1} dB) than to its own ({own:.1} dB)", x.pts, n.pts);
         }
-        worst = worst.min(own);
     }
     worst
 }
