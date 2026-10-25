@@ -10,6 +10,7 @@
 //!   library) are the only modules with `unsafe`;
 //! - [`dec`] and [`enc`] drive a session through the [`backend`] traits and are safe code, tested
 //!   against mock sessions on any Linux;
+//! - [`query`] asks libnvmpi (`nvmpi_query_codec`, optional) whether a codec works, before any session;
 //! - [`cap`] is the global session cap (the Tegra driver crashes on concurrent sessions and on
 //!   rapid open / close).
 //!
@@ -23,6 +24,7 @@ pub mod enc;
 pub mod ffi;
 #[allow(unsafe_code)]
 pub mod loader;
+pub mod query;
 #[allow(unsafe_code)]
 pub mod session_dec;
 #[allow(unsafe_code)]
@@ -34,6 +36,8 @@ mod dec_tests;
 mod enc_drain_tests;
 #[cfg(test)]
 mod enc_tests;
+#[cfg(test)]
+mod query_tests;
 
 #[cfg(test)]
 mod abi_tests;

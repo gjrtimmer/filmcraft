@@ -3,6 +3,7 @@
 //! nvmpi backend. The library stays loaded for the life of the process, so the function pointers
 //! never dangle.
 
+use std::ffi::c_int;
 use std::sync::OnceLock;
 
 use super::ffi::*;
@@ -25,6 +26,8 @@ pub struct Api {
     pub encoder_dq_empty_packet: EncoderDqEmptyPacket,
     pub encoder_q_empty_packet: EncoderQEmptyPacket,
     pub encoder_close: EncoderClose,
+    /// `nvmpi_query_codec` (libnvmpi >= 4.10.0): `None` on an older library.
+    query_codec: Option<QueryCodec>,
     /// Keeps the library mapped; never dropped (the `Api` lives in a static).
     _library: libloading::Library,
 }
@@ -40,6 +43,15 @@ unsafe fn symbol<T: Copy>(library: &libloading::Library, name: &'static [u8]) ->
 }
 
 impl Api {
+    /// The raw answer of `nvmpi_query_codec` for a codec (`NV_VIDEO_Coding*`), direction and raw pixel
+    /// layout (`NV_PIX_*`): `None` when the library has no such symbol. Opens no session.
+    pub fn query_codec(&self, codec: c_int, is_encoder: bool, pix: c_int) -> Option<c_int> {
+        let query = self.query_codec?;
+        // SAFETY: `query` was resolved from the loaded library, which stays mapped; the call takes
+        // three plain integers, touches no caller memory and opens no session (nvmpi.h v4.10).
+        Some(unsafe { query(codec, c_int::from(is_encoder), pix) })
+    }
+
     fn open() -> Result<Self, String> {
         let mut last = String::from("no library name");
         for name in NAMES {
@@ -69,6 +81,8 @@ impl Api {
                 encoder_dq_empty_packet: symbol(&library, b"nvmpi_encoder_dqEmptyPacket\0")?,
                 encoder_q_empty_packet: symbol(&library, b"nvmpi_encoder_qEmptyPacket\0")?,
                 encoder_close: symbol(&library, b"nvmpi_encoder_close\0")?,
+                // optional: an older library has no such symbol and then every codec is tried as before
+                query_codec: symbol(&library, b"nvmpi_query_codec\0").ok(),
                 _library: library,
             })
         }

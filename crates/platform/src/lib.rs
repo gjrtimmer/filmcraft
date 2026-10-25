@@ -206,7 +206,7 @@ pub fn hardware_decoder_for(entry: &filmcraft_isobmff::SampleEntry) -> bool {
         filmcraft_codecs::hw::NalStreamInfo::from_entry(entry).and_then(|r| r.ok()).is_some_and(|info| {
             // no session is opened to answer: the stream is one nvmpi decodes and libnvmpi is there
             #[cfg(target_arch = "aarch64")]
-            if nvmpi::dec::takes(&info).is_ok() && nvmpi::probe().is_ok() {
+            if nvmpi::dec::offered(&info).is_ok() && nvmpi::probe().is_ok() {
                 return true;
             }
             #[cfg(target_pointer_width = "64")]

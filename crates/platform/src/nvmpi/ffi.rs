@@ -14,6 +14,13 @@ pub const NV_PIX_P010: c_int = 2;
 pub const NV_VIDEO_CodingH264: c_int = 1;
 pub const NV_VIDEO_CodingHEVC: c_int = 6;
 
+/// `NVMPI_CODEC_SUPPORTED`: `nvmpi_query_codec` says this process can use the codec.
+pub const NVMPI_CODEC_SUPPORTED: c_int = 0;
+/// `NVMPI_CODEC_UNSUPPORTED_HW`: the library can, this module or driver cannot.
+pub const NVMPI_CODEC_UNSUPPORTED_HW: c_int = 1;
+/// `NVMPI_CODEC_UNSUPPORTED_BUILD`: this libnvmpi build cannot, on any module.
+pub const NVMPI_CODEC_UNSUPPORTED_BUILD: c_int = 2;
+
 /// `NVMPI_ERR_EAGAIN`: the frame was not queued; drain packets and retry the same frame.
 pub const NVMPI_ERR_EAGAIN: c_int = -11;
 /// `NVMPI_ERR_INVAL`.
@@ -133,3 +140,5 @@ pub type EncoderDqEmptyPacket = unsafe extern "C" fn(*mut nvmpictx, *mut *mut nv
 pub type EncoderQEmptyPacket = unsafe extern "C" fn(*mut nvmpictx, *mut nvPacket);
 /// `nvmpi_encoder_close`.
 pub type EncoderClose = unsafe extern "C" fn(*mut nvmpictx) -> c_int;
+/// `nvmpi_query_codec(type, is_encoder, pix_fmt)` (libnvmpi >= 4.10.0; optional, see the loader).
+pub type QueryCodec = unsafe extern "C" fn(c_int, c_int, c_int) -> c_int;
