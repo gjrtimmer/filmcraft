@@ -4,12 +4,11 @@
 //! [`register`] puts the platform's hardware decoder factory in front of FilmCraft's own decoders
 //! (`filmcraft_codecs::register_video_decoder`). Today that is VideoToolbox on macOS for H.264
 //! (`avcC`) and HEVC (`hvcC`) streams, 8- and 10-bit, 4:2:0 and 4:2:2; Media Foundation / DXVA on
-//! Windows; NVDEC ([`nvdec`], NVIDIA's driver), VA-API ([`vaapi`]) and, on a Jetson (Linux aarch64), libnvmpi
-//! ([`nvmpi`]) on Linux for H.264 and HEVC; on other systems (and on
-//! Linux with none of them) registration does nothing and reports [`Availability::Unavailable`]. It also registers a
+//! Windows; NVDEC ([`nvdec`], NVIDIA's driver) and VA-API ([`vaapi`]) on Linux for H.264 and HEVC; on other systems (and on
+//! Linux with neither) registration does nothing and reports [`Availability::Unavailable`]. It also registers a
 //! hardware H.264 encoder factory (`filmcraft_export::register_encoder`) that only acts when an
 //! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`]; on
-//! macOS, on Windows (NVENC, [`nvenc`]) and on a Jetson (libnvmpi) it also makes the H.265 export format available, and on Windows
+//! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available, and on Windows
 //! (Main 10) lets HDR sequences export as HDR H.265.
 //!
 //! Hardware decoding never makes a file undecodable:
@@ -45,8 +44,6 @@ pub mod media_foundation;
 pub mod nvdec;
 #[cfg(any(target_os = "windows", all(target_os = "linux", target_pointer_width = "64")))]
 pub mod nvenc;
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-pub mod nvmpi;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod vaapi;
 #[cfg(target_os = "macos")]
@@ -133,27 +130,6 @@ pub fn register() -> Availability {
             }
             Err(why) => log::info!("no NVDEC hardware decoding: {why}"),
         }
-        // A Jetson has neither VA-API nor NVDEC: libnvmpi (Tegra NVDEC through V4L2) is its decoder. It goes
-        // in front, and what it declines (a thumbnail, a stream it does not take, the session cap) still
-        // reaches the software decoders. The probe loads the library and opens no hardware session.
-        #[cfg(target_arch = "aarch64")]
-        match nvmpi::probe() {
-            Ok(library) => {
-                static NVMPI: std::sync::Once = std::sync::Once::new();
-                NVMPI.call_once(|| log::info!("hardware decoding through nvmpi: {library}"));
-                // Export ▸ Hardware encoding (H.264): in front of the software encoder (and of NVENC, which a
-                // Jetson does not have), taking an export only when asked for and when nvmpi can do it
-                filmcraft_export::register_encoder(nvmpi::enc::factory);
-                // Export ▸ H.265: nvmpi is FilmCraft's only HEVC encoder on Linux, so the format is available
-                // when libnvmpi loads (the probe opens no session). It writes Main 8-bit SDR: no HDR probe, an HDR
-                // sequence is tone-mapped to SDR as before.
-                filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvmpi::enc::hevc_available);
-                filmcraft_codecs::register_video_decoder(nvmpi_factory);
-                filmcraft_codecs::hw::set_hw_backend("nvmpi");
-                available = Availability::Available("nvmpi");
-            }
-            Err(why) => log::info!("no nvmpi hardware decoding: {why}"),
-        }
         available
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -174,10 +150,6 @@ pub fn registered() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        #[cfg(target_arch = "aarch64")]
-        if filmcraft_codecs::video_decoder_registered(nvmpi_factory) {
-            return true;
-        }
         #[cfg(target_pointer_width = "64")]
         if filmcraft_codecs::video_decoder_registered(nvdec_factory) {
             return true;
@@ -204,11 +176,6 @@ pub fn hardware_decoder_for(entry: &filmcraft_isobmff::SampleEntry) -> bool {
     #[cfg(target_os = "linux")]
     {
         filmcraft_codecs::hw::NalStreamInfo::from_entry(entry).and_then(|r| r.ok()).is_some_and(|info| {
-            // no session is opened to answer: the stream is one nvmpi decodes and libnvmpi is there
-            #[cfg(target_arch = "aarch64")]
-            if nvmpi::dec::offered(&info).is_ok() && nvmpi::probe().is_ok() {
-                return true;
-            }
             #[cfg(target_pointer_width = "64")]
             if nvdec::NvDecoder::new(info.clone()).is_ok() {
                 return true;
@@ -297,32 +264,5 @@ pub fn nvdec_factory(entry: &filmcraft_isobmff::SampleEntry) -> Option<filmcraft
             }
             None
         }
-    }
-}
-
-/// The nvmpi factory: a [`HybridDecoder`] around [`nvmpi::dec::NvmpiDecoder`] for H.264 and HEVC streams
-/// libnvmpi decodes on this Jetson, `None` otherwise. It also declines background work (thumbnails:
-/// the Tegra V4L2 driver crashes on many short-lived or concurrent sessions, so only decoders a monitor
-/// or an export waits for get hardware) and, through the session cap, any decoder beyond the limit.
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub fn nvmpi_factory(entry: &filmcraft_isobmff::SampleEntry) -> Option<filmcraft_codecs::Result<Box<dyn filmcraft_codecs::VideoDecoder>>> {
-    if !filmcraft_codecs::hw::hardware_decoding() {
-        return None;
-    }
-    let info = filmcraft_codecs::hw::NalStreamInfo::from_entry(entry)?.ok()?;
-    let declined = |why: &dyn std::fmt::Display| {
-        log::info!("nvmpi declined {} video: {why}", entry.codec.name());
-        // with VA-API or NVDEC behind this factory, those count the decline (or take the stream)
-        if !filmcraft_codecs::video_decoder_registered(nvdec_factory) && !filmcraft_codecs::video_decoder_registered(vaapi_factory) {
-            filmcraft_codecs::hw::note_hw_declined();
-        }
-        None
-    };
-    if filmcraft_media::cancel::background() {
-        return declined(&"background work (thumbnails stay in software)");
-    }
-    match nvmpi::dec::NvmpiDecoder::new(info.clone()) {
-        Ok(nv) => Some(Ok(Box::new(HybridDecoder::new(Box::new(nv), entry.clone(), info)))),
-        Err(why) => declined(&why),
     }
 }
