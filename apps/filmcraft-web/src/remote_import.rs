@@ -9,7 +9,7 @@
 use filmcraft_engine::Services;
 use serde_json::{Value, json};
 
-use crate::remote::{self, ensure_stat};
+use crate::remote::{self, ensure_stat, ensure_stat_until};
 
 /// Media paths of one project whose sizes are fetched before it opens.
 const MEDIA_MAX: usize = 10_000;
@@ -43,15 +43,15 @@ pub async fn prefetch_media(project: &[u8]) {
 }
 
 /// [`prefetch_media`] that stops starting new lookups once `deadline` has passed (the rest stays
-/// unresolved, so the engine reports it offline). A request already running is bounded by its own
-/// timeout.
+/// unresolved, so the engine reports it offline). A request already running is aborted when
+/// `deadline` passes.
 pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Instant>) {
     for p in media_paths(project).into_iter().filter(|p| remote::is_remote(p)).take(MEDIA_MAX) {
         if deadline.is_some_and(|d| web_time::Instant::now() >= d) {
             log::info!("remote media: time budget used up, the rest stays unresolved");
             break;
         }
-        if let Err(e) = ensure_stat(&p).await {
+        if let Err(e) = ensure_stat_until(&p, deadline).await {
             log::info!("remote media {p}: {e}");
         }
     }

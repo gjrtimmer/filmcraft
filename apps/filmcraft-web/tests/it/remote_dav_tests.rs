@@ -158,3 +158,14 @@ fn metadata_requests_time_out_quickly_and_file_transfers_get_a_long_cap() {
     assert_eq!(timeout_ms("GET"), 300_000);
     assert_eq!(timeout_ms("PUT"), 300_000);
 }
+
+/// A time budget shortens a request's timeout but never lengthens it or lets it reach zero.
+#[test]
+fn a_time_budget_shortens_the_request_timeout() {
+    use crate::remote_dav::capped_timeout_ms;
+    assert_eq!(capped_timeout_ms(20_000, None), 20_000);
+    assert_eq!(capped_timeout_ms(20_000, Some(5_000)), 5_000);
+    assert_eq!(capped_timeout_ms(20_000, Some(60_000)), 20_000);
+    assert_eq!(capped_timeout_ms(20_000, Some(u64::MAX)), 20_000);
+    assert_eq!(capped_timeout_ms(20_000, Some(0)), 1);
+}

@@ -16,6 +16,15 @@ pub fn timeout_ms(method: &str) -> i32 {
     }
 }
 
+/// A request timeout cut to the time left in the caller's budget (`None`: no budget), at least
+/// 1 ms so an expired budget aborts the request at once.
+pub fn capped_timeout_ms(base: i32, left_ms: Option<u64>) -> i32 {
+    match left_ms {
+        Some(left) => i32::try_from(left).map_or(base, |l| l.min(base)).max(1),
+        None => base,
+    }
+}
+
 /// Largest PROPFIND answer read (bytes).
 pub const MAX_XML_BYTES: usize = 16 << 20;
 /// Most entries of one directory listing.
