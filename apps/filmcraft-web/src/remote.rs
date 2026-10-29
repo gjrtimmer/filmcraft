@@ -95,6 +95,16 @@ pub(crate) fn cfg_and_origin() -> Result<(Config, String), String> {
     })
 }
 
+/// Chunk size (bytes) and chunks fetched at once for remote files: the configured values, the
+/// defaults while remote storage is not configured.
+pub(crate) fn transfer() -> (u64, u64) {
+    STATE.with(|s| {
+        let s = s.borrow();
+        let (c, p) = s.cfg.as_ref().map_or((remote_config::DEFAULT_CHUNK_BYTES, remote_config::DEFAULT_PARALLEL), |c| (c.chunk_bytes, c.parallel));
+        (c, p as u64)
+    })
+}
+
 /// Read `./filmcraft-config.json` once for both of its parts: the page config
 /// ([`crate::page_config::apply`], the `startup` key) and the remote mounts. Remote storage stays
 /// off when the file is missing or invalid, or has no `remote` key.

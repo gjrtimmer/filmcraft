@@ -6,6 +6,12 @@ mod recovery_policy;
 #[path = "../../src/web_config.rs"]
 mod web_config;
 mod web_config_tests;
+
+#[allow(dead_code)]
+#[path = "../../src/readahead.rs"]
+mod readahead;
+mod readahead_tests;
+
 // The pure remote-storage modules, included as the crate's own modules (the real crate is wasm32-only).
 #[allow(dead_code)]
 #[path = "../../src/remote_config.rs"]

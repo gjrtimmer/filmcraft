@@ -25,6 +25,7 @@ pub mod fs;
 pub mod import;
 pub mod opfs;
 pub mod page_config;
+pub mod readahead;
 pub mod recovery;
 pub mod recovery_policy;
 pub mod remote;

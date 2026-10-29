@@ -18,8 +18,14 @@ const IMPORT_MAX: usize = 10_000;
 /// Folders and folder depth one import prepares (as the engine's folder import).
 const FOLDERS_MAX: usize = 4096;
 const DEPTH_MAX: usize = 32;
-/// Runs of one import while its bytes load (about 25 ms apart).
+/// Runs of one folder listing while it loads (about 25 ms apart).
 const RETRIES: usize = 2400;
+/// Seconds one import command keeps running again while its bytes load.
+const LOAD_BUDGET_S: u64 = 300;
+/// Longest wait for a chunk to arrive before a run is repeated anyway (milliseconds).
+const WAKE_MS: i32 = 250;
+/// Bytes of media files one project load warms up: half the chunk cache, so nothing it fetched is evicted again.
+const WARM_BUDGET: u64 = (crate::fs::CACHE_BUDGET / 2) as u64;
 
 /// The media (and proxy) file paths a project file refers to.
 fn media_paths(bytes: &[u8]) -> Vec<String> {
@@ -44,15 +50,30 @@ pub async fn prefetch_media(project: &[u8]) {
 
 /// [`prefetch_media`] that stops starting new lookups once `deadline` has passed (the rest stays
 /// unresolved, so the engine reports it offline). A request already running is aborted when
-/// `deadline` passes.
+/// `deadline` passes. WebM, Matroska and QuickTime files also get their container index loaded
+/// (as an import does), up to [`WARM_BUDGET`] bytes of files, so opening the project does not
+/// start with a scan of the whole file.
 pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Instant>) {
+    let mut warm_left = WARM_BUDGET;
+    let mut seen = std::collections::HashSet::new();
     for p in media_paths(project).into_iter().filter(|p| remote::is_remote(p)).take(MEDIA_MAX) {
         if deadline.is_some_and(|d| web_time::Instant::now() >= d) {
             log::info!("remote media: time budget used up, the rest stays unresolved");
             break;
         }
-        if let Err(e) = ensure_stat_until(&p, deadline).await {
-            log::info!("remote media {p}: {e}");
+        if !seen.insert(p.clone()) {
+            continue;
+        }
+        match ensure_stat_until(&p, deadline).await {
+            Ok(st) if !st.is_dir && crate::readahead::warms_at_load(&p) && st.size <= warm_left => {
+                // registers the file's chunk cache; a file the engine cannot read is not warmed
+                if crate::fs::WebServices.reader(&p).is_some_and(|r| r.is_ok()) {
+                    warm_left -= st.size;
+                    crate::import::prewarm(&p, st.size).await;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log::info!("remote media {p}: {e}"),
         }
     }
 }
@@ -103,9 +124,12 @@ async fn prepare(path: &str, budget: &mut usize) {
     }
 }
 
-/// Run `id` with `params` on the UI thread, again while a read of it was still loading.
+/// Run `id` with `params` on the UI thread, again while a read of it was still loading. A repeat
+/// waits for the next chunk to arrive (not for every fetch in flight), so it never waits for the
+/// slowest chunk of a wide read-ahead.
 async fn run(id: &str, params: Value) -> Result<Value, String> {
-    for _ in 0..RETRIES {
+    let give_up = web_time::Instant::now() + std::time::Duration::from_secs(LOAD_BUDGET_S);
+    while web_time::Instant::now() < give_up {
         let (id, params) = (id.to_string(), params.clone());
         let (r, pending) = crate::import::on_ui(move |w, _| {
             let _ = filmcraft_media::pending::take();
@@ -118,8 +142,12 @@ async fn run(id: &str, params: Value) -> Result<Value, String> {
             Err(_) => true,
         };
         if failed && pending {
-            crate::fs::idle().await;
-            crate::fs::sleep(25).await;
+            if crate::fs::inflight() == 0 {
+                // nothing is being fetched: a size or listing is on its way
+                crate::fs::sleep(25).await;
+            } else {
+                crate::fs::next_data(WAKE_MS).await;
+            }
             continue;
         }
         return r;

@@ -147,6 +147,24 @@ fn list_cache_seconds_defaults_is_read_and_clamped() {
     }
 }
 
+/// Chunk size and parallel reads default, are read and clamped.
+#[test]
+fn chunk_bytes_and_parallel_default_are_read_and_clamped() {
+    let with = |extra: &str| {
+        let c = cfg(&format!(r#"{{"remote":{{"mounts":[{{"path":"/data","url":"dav/"}}]{extra}}}}}"#)).unwrap();
+        (c.chunk_bytes, c.parallel)
+    };
+    assert_eq!(with(""), (4 << 20, 12));
+    assert_eq!(with(r#","chunkBytes":1048576,"parallel":4"#), (1 << 20, 4));
+    assert_eq!(with(r#","chunkBytes":1,"parallel":0"#), (256 << 10, 1));
+    assert_eq!(with(r#","chunkBytes":1e12,"parallel":1000"#), (16 << 20, 32));
+    assert_eq!(with(r#","chunkBytes":-5,"parallel":-1"#), (256 << 10, 1));
+    assert_eq!(with(r#","chunkBytes":2.9,"parallel":2.9"#), (256 << 10, 2));
+    for wrong in [r#""60""#, "true", "null", "[1]", r#"{"a":1}"#] {
+        assert_eq!(with(&format!(r#","chunkBytes":{wrong},"parallel":{wrong}"#)), (4 << 20, 12), "{wrong} keeps the defaults");
+    }
+}
+
 /// Reserved roots are refused and other roots accepted.
 #[test]
 fn reserved_roots_are_refused_and_other_roots_accepted() {
