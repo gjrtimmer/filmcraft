@@ -29,6 +29,12 @@ pub fn note_opened(path: &str, etag: Option<String>) {
     UPLOADS.with(|u| u.borrow_mut().seen.insert(path.to_string(), etag));
 }
 
+/// Forget the version of `path`: it cannot be tied to what this session wrote, so the next save is
+/// a conflict or Save As.
+fn forget_version(path: &str) {
+    UPLOADS.with(|u| u.borrow_mut().seen.remove(path));
+}
+
 /// What this session knows about `path`'s version on the server.
 fn known(path: &str) -> Known {
     UPLOADS.with(|u| match u.borrow().seen.get(path) {
@@ -111,19 +117,6 @@ async fn upload(path: &str, bytes: &[u8]) -> Outcome {
     outcome
 }
 
-/// The ETag of the target after a save (`Some(None)`: the server sends none); the `HEAD` is tried
-/// twice, `None` when neither answered 200.
-async fn saved_etag(head: &Req) -> Option<Option<String>> {
-    for _ in 0..2 {
-        if let Ok(r) = send(head, None).await
-            && r.status() == 200
-        {
-            return Some(header(&r, "etag"));
-        }
-    }
-    None
-}
-
 /// The requests of one save in order: upload, check the target, move. Stops at the first failure.
 async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &str, token: &str, bytes: &[u8]) -> Outcome {
     let step = |e: String| Outcome::Failed(e);
@@ -131,13 +124,21 @@ async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &s
         Ok(r) => r,
         Err(e) => return step(e),
     };
-    match send(&put, Some(bytes)).await {
+    let mut part_etag = match send(&put, Some(bytes)).await {
         Ok(r) => {
             if let Err(e) = rw::classify_put(r.status()) {
                 return step(e);
             }
+            header(&r, "etag")
         }
         Err(e) => return step(e),
+    };
+    // the upload's own version, to tie the target's to it after the move
+    if part_etag.is_none() {
+        part_etag = match rw::head_part(cfg, path, token) {
+            Ok(h) => send(&h, None).await.ok().filter(|r| r.status() == 200).and_then(|r| header(&r, "etag")),
+            Err(e) => return step(e),
+        };
     }
     let head = match rw::head_target(cfg, path) {
         Ok(r) => r,
@@ -156,17 +157,21 @@ async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &s
         Ok(r) => r,
         Err(e) => return step(e),
     };
-    let outcome = match send(&mv, None).await {
-        Ok(r) => rw::classify_move(r.status(), overwrite),
+    let (outcome, moved_etag) = match send(&mv, None).await {
+        Ok(r) => (rw::classify_move(r.status(), overwrite), header(&r, "etag")),
         Err(e) => return step(e),
     };
     if outcome == Outcome::Saved {
-        // the new version is what this session now expects; listings and sizes are stale
-        match saved_etag(&head).await {
-            Some(etag) => note_opened(path, etag),
-            // not recorded as "no ETag" (that would stop conflicts being detected): the old state
-            // stays, so the next save may report a conflict that is none, never overwrite silently
-            None => log::warn!("saving {path}: could not read the new ETag; the next save may report a conflict"),
+        // The version this save made: the move's own, else the target's when it is the upload's
+        // (see `saved_version`). A follow-up HEAD alone could show another writer's version.
+        let after = match send(&head, None).await {
+            Ok(r) if r.status() == 200 => header(&r, "etag"),
+            _ => None,
+        };
+        match rw::saved_version(moved_etag.as_deref(), part_etag.as_deref(), after.as_deref()) {
+            rw::SavedVersion::Etag(e) => note_opened(path, Some(e)),
+            rw::SavedVersion::NoEtag => note_opened(path, None),
+            rw::SavedVersion::Unbound => forget_version(path),
         }
         crate::remote::forget(path);
     }
