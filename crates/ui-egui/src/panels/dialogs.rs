@@ -3,6 +3,7 @@
 
 use crate::{Dialog, FilmcraftApp};
 
+/// Draw the open dialogs.
 pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     crate::panels::media_dialogs::show(app, ctx);
     crate::panels::color_dialogs::show(app, ctx);

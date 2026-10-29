@@ -1,6 +1,6 @@
 //! Saving a project to a writable remote mount ([`crate::remote_write`] has the protocol). The
 //! engine's `write_file` is synchronous, so the bytes are kept in memory under the path (reads see
-//! them at once) and uploaded in the background: `.part` file, check of the target's ETag, move.
+//! them at once) and uploaded in the background: a unique temporary `.part` file, check of the target's ETag, move.
 //! When the upload fails the project is marked unsaved again and the status line says why.
 //!
 //! One upload runs per path at a time; a save made meanwhile replaces the one waiting.
@@ -29,6 +29,7 @@ pub fn note_opened(path: &str, etag: Option<String>) {
     UPLOADS.with(|u| u.borrow_mut().seen.insert(path.to_string(), etag));
 }
 
+/// What this session knows about `path`'s version on the server.
 fn known(path: &str) -> Known {
     UPLOADS.with(|u| match u.borrow().seen.get(path) {
         Some(Some(e)) => Known::Etag(e.clone()),
@@ -37,6 +38,7 @@ fn known(path: &str) -> Known {
     })
 }
 
+/// Send one request built by [`crate::remote_write`].
 async fn send(r: &Req, body: Option<&[u8]>) -> Result<web_sys::Response, String> {
     let headers: Vec<(&str, &str)> = r.headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
     fetch(r.method, &r.url, &headers, body).await
@@ -87,25 +89,45 @@ fn report(path: &str, outcome: &Outcome) {
     });
 }
 
-/// Upload `bytes` to `<path>.part`, check the target, move the upload over it.
+/// A token unique to one upload (time plus random), ASCII alphanumeric.
+fn new_token() -> String {
+    format!("{:x}{:x}", js_sys::Date::now() as u64, (js_sys::Math::random() * 4_294_967_296.0) as u64)
+}
+
+/// Upload `bytes` to a unique `<path>.<token>.part`, check the target, move the upload over it.
 async fn upload(path: &str, bytes: &[u8]) -> Outcome {
     let (cfg, origin) = match cfg_and_origin() {
         Ok(v) => v,
         Err(e) => return Outcome::Failed(e),
     };
-    let outcome = upload_steps(&cfg, &origin, path, bytes).await;
+    let token = new_token();
+    let outcome = upload_steps(&cfg, &origin, path, &token, bytes).await;
     if outcome != Outcome::Saved {
-        // best effort: the .part file is of no use
-        if let Ok(d) = rw::delete_part(&cfg, path) {
+        // best effort: this upload's .part file is of no use
+        if let Ok(d) = rw::delete_part(&cfg, path, &token) {
             let _ = send(&d, None).await;
         }
     }
     outcome
 }
 
-async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &str, bytes: &[u8]) -> Outcome {
+/// The ETag of the target after a save (`Some(None)`: the server sends none); the `HEAD` is tried
+/// twice, `None` when neither answered 200.
+async fn saved_etag(head: &Req) -> Option<Option<String>> {
+    for _ in 0..2 {
+        if let Ok(r) = send(head, None).await
+            && r.status() == 200
+        {
+            return Some(header(&r, "etag"));
+        }
+    }
+    None
+}
+
+/// The requests of one save in order: upload, check the target, move. Stops at the first failure.
+async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &str, token: &str, bytes: &[u8]) -> Outcome {
     let step = |e: String| Outcome::Failed(e);
-    let put = match rw::put_part(cfg, path) {
+    let put = match rw::put_part(cfg, path, token) {
         Ok(r) => r,
         Err(e) => return step(e),
     };
@@ -125,25 +147,27 @@ async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &s
         Ok(r) => match rw::precondition(&known(path), r.status(), header(&r, "etag").as_deref()) {
             Precondition::Proceed { overwrite } => overwrite,
             Precondition::Conflict => return Outcome::Conflict,
+            Precondition::Exists => return Outcome::Exists,
             Precondition::Failed(e) => return step(e),
         },
         Err(e) => return step(e),
     };
-    let mv = match rw::move_part(cfg, origin, path, overwrite) {
+    let mv = match rw::move_part(cfg, origin, path, token, overwrite) {
         Ok(r) => r,
         Err(e) => return step(e),
     };
     let outcome = match send(&mv, None).await {
-        Ok(r) => rw::classify_move(r.status()),
+        Ok(r) => rw::classify_move(r.status(), overwrite),
         Err(e) => return step(e),
     };
     if outcome == Outcome::Saved {
         // the new version is what this session now expects; listings and sizes are stale
-        let etag = match send(&head, None).await {
-            Ok(r) if r.status() == 200 => header(&r, "etag"),
-            _ => None,
-        };
-        note_opened(path, etag);
+        match saved_etag(&head).await {
+            Some(etag) => note_opened(path, etag),
+            // not recorded as "no ETag" (that would stop conflicts being detected): the old state
+            // stays, so the next save may report a conflict that is none, never overwrite silently
+            None => log::warn!("saving {path}: could not read the new ETag; the next save may report a conflict"),
+        }
         crate::remote::forget(path);
     }
     outcome

@@ -18,10 +18,12 @@ pub struct FileDialogState {
     pub remote: Option<crate::panels::remote_dialog::RemoteDialog>,
 }
 
+/// The frame of a modal dialog in the current theme.
 pub(crate) fn modal_frame(t: &Tokens) -> Frame {
     Frame::new().fill(t.panel_bg).stroke(Stroke::new(1.0, t.separator)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(0))
 }
 
+/// A dialog button registered under its automation id; true when clicked.
 pub(crate) fn button(app: &mut FilmcraftApp, ui: &mut Ui, id: &str, label: &str, primary: bool) -> bool {
     let t = app.tokens;
     let text = RichText::new(label).size(13.0).color(if primary { Color32::WHITE } else { t.text });

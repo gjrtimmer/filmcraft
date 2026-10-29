@@ -2,6 +2,7 @@
 
 use crate::remote_lookup::{ABSENT_RETRY_S, FAILED_RETRY_S, Lookups, Next, Outcome};
 
+/// First miss fetches and the rest wait.
 #[test]
 fn first_miss_fetches_and_the_rest_wait() {
     let mut l = Lookups::default();
@@ -10,6 +11,7 @@ fn first_miss_fetches_and_the_rest_wait() {
     assert_eq!(l.miss("/data/b.mp4", 0.1), Next::Fetch);
 }
 
+/// Found ends the lookup.
 #[test]
 fn found_ends_the_lookup() {
     let mut l = Lookups::default();
@@ -19,6 +21,7 @@ fn found_ends_the_lookup() {
     assert_eq!(l.miss("/data/a.mp4", 2.0), Next::Fetch);
 }
 
+/// A 404 becomes missing not loading.
 #[test]
 fn a_404_becomes_missing_not_loading() {
     let mut l = Lookups::default();
@@ -30,6 +33,7 @@ fn a_404_becomes_missing_not_loading() {
     assert_eq!(l.miss("/data/gone.mp4", 1.0 + ABSENT_RETRY_S + 0.5), Next::Fetch);
 }
 
+/// A failed lookup is missing for a short while.
 #[test]
 fn a_failed_lookup_is_missing_for_a_short_while() {
     let mut l = Lookups::default();
@@ -39,6 +43,7 @@ fn a_failed_lookup_is_missing_for_a_short_while() {
     assert_eq!(l.miss("/data/x.mp4", 1.0 + FAILED_RETRY_S + 0.5), Next::Fetch);
 }
 
+/// Forget clears a miss.
 #[test]
 fn forget_clears_a_miss() {
     let mut l = Lookups::default();
@@ -48,6 +53,7 @@ fn forget_clears_a_miss() {
     assert_eq!(l.miss("/data/w.mp4", 1.0), Next::Fetch);
 }
 
+/// Concurrent lookups are capped.
 #[test]
 fn concurrent_lookups_are_capped() {
     let mut l = Lookups::default();
@@ -63,6 +69,7 @@ fn concurrent_lookups_are_capped() {
     assert_eq!(l.miss("/data/9999.mp4", 1.0), Next::Fetch);
 }
 
+/// The miss table stays bounded.
 #[test]
 fn the_miss_table_stays_bounded() {
     let mut l = Lookups::default();

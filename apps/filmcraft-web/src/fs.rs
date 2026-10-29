@@ -361,6 +361,7 @@ fn not_found(path: &str) -> io::Error {
 pub struct WebServices;
 
 impl WebServices {
+    /// Open a reader over the in-memory entry at `path`, or the error the engine shows.
     fn entry_reader(path: &str) -> io::Result<SharedReader> {
         let local = FS.with(|fs| match fs.borrow().entries.get(path) {
             Some(Entry::Blob { id, size }) => Some(Ok(Arc::new(BlobReader { id: *id, size: *size }) as SharedReader)),
@@ -391,6 +392,7 @@ impl Services for WebServices {
         filmcraft_media::reader::read_range(&*r, 0, r.len() as usize)
     }
 
+    /// Write `data` at `path`: a remote mount uploads in the background, OPFS persists it, anything else stays in memory.
     fn write_file(&self, path: &str, data: &[u8]) -> io::Result<()> {
         // a path on a remote mount: uploaded to the server (writable mounts) or refused (read-only)
         if let Some(r) = crate::remote_upload::write(path, data) {
@@ -412,6 +414,7 @@ impl Services for WebServices {
         Ok(())
     }
 
+    /// Create `path` with `data` in memory; fails when it exists. Not available on remote mounts or OPFS.
     fn write_file_new(&self, path: &str, data: &[u8]) -> io::Result<()> {
         if crate::remote::is_remote(path) {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive creation on remote storage is unavailable"));

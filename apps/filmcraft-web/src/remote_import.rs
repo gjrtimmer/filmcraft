@@ -39,7 +39,18 @@ fn media_paths(bytes: &[u8]) -> Vec<String> {
 /// Fetch the size of every remote file a project (its bytes) refers to, so the synchronous
 /// `Services` find them when it opens. Missing ones stay missing: the engine reports them offline.
 pub async fn prefetch_media(project: &[u8]) {
+    prefetch_media_until(project, None).await;
+}
+
+/// [`prefetch_media`] that stops starting new lookups once `deadline` has passed (the rest stays
+/// unresolved, so the engine reports it offline). A request already running is bounded by its own
+/// timeout.
+pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Instant>) {
     for p in media_paths(project).into_iter().filter(|p| remote::is_remote(p)).take(MEDIA_MAX) {
+        if deadline.is_some_and(|d| web_time::Instant::now() >= d) {
+            log::info!("remote media: time budget used up, the rest stays unresolved");
+            break;
+        }
         if let Err(e) = ensure_stat(&p).await {
             log::info!("remote media {p}: {e}");
         }

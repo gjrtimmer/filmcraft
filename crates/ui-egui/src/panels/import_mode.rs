@@ -7,6 +7,7 @@ use serde_json::json;
 use crate::FilmcraftApp;
 use crate::theme::Tokens;
 
+/// Draw the import view in `rect`.
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     ui.painter().rect_filled(rect, t.radius, t.panel_bg);

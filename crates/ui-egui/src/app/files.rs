@@ -56,6 +56,7 @@ impl FilmcraftApp {
         r
     }
 
+    /// Open the file dialog `id` with the given parameters, or report why it cannot open.
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {

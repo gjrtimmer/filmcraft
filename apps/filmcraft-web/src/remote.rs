@@ -61,6 +61,7 @@ thread_local! {
     static T0: web_time::Instant = web_time::Instant::now();
 }
 
+/// Seconds since the page started, for cache expiry.
 fn now_s() -> f64 {
     T0.with(|t| t.elapsed().as_secs_f64())
 }
@@ -87,11 +88,13 @@ pub fn stat(path: &str) -> Option<Stat> {
     STATE.with(|s| s.borrow().stats.get(path.strip_suffix('/').unwrap_or(path)).cloned())
 }
 
+/// Text of a JavaScript error value.
 pub(crate) fn js_err(e: wasm_bindgen::JsValue) -> String {
     let aborted = js_sys::Reflect::get(&e, &"name".into()).ok().and_then(|n| n.as_string()).is_some_and(|n| n == "AbortError");
     if aborted { "the server did not answer in time".to_string() } else { format!("{e:?}") }
 }
 
+/// Send one request with the page's credentials and a timeout; the response of any status, or the failure text.
 pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<web_sys::Response, String> {
     let init = web_sys::RequestInit::new();
     init.set_method(method);
@@ -121,6 +124,7 @@ pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], bod
     resp.dyn_into::<web_sys::Response>().map_err(|_| "fetch did not return a Response".to_string())
 }
 
+/// A response header's value, `None` when absent.
 pub(crate) fn header(r: &web_sys::Response, name: &str) -> Option<String> {
     r.headers().get(name).ok().flatten()
 }
@@ -138,6 +142,7 @@ pub(crate) async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u
     Ok(a.to_vec())
 }
 
+/// The remote config and the page origin, or why remote storage is unavailable.
 pub(crate) fn cfg_and_origin() -> Result<(Config, String), String> {
     STATE.with(|s| {
         let s = s.borrow();
@@ -181,6 +186,7 @@ async fn propfind(dir: &str) -> Result<Vec<Child>, String> {
     Ok(remote_dav::children_of(&cfg, &mount, dir, &origin, entries))
 }
 
+/// Store the outcome of a folder listing in the cache and wake what waited for it.
 fn record_dir(dir: &str, res: Result<Vec<Child>, String>) {
     let now = now_s();
     STATE.with(|s| {
@@ -211,6 +217,7 @@ fn record_dir(dir: &str, res: Result<Vec<Child>, String>) {
     });
 }
 
+/// Start the listing of `dir` unless one is already running.
 fn start_listing(dir: String) {
     wasm_bindgen_futures::spawn_local(async move {
         let res = propfind(&dir).await;
@@ -277,6 +284,18 @@ pub async fn ensure_stat(path: &str) -> Result<Stat, String> {
     })
 }
 
+/// Whether `dir` has a cached listing still inside the cache time: asking the server again for it
+/// would only repeat what is known (the file is then looked up with a `HEAD`).
+fn listing_fresh(dir: &str) -> bool {
+    let now = now_s();
+    STATE.with(|s| {
+        let s = s.borrow();
+        let ttl = s.cfg.as_ref().map_or(remote_config::DEFAULT_LIST_CACHE_S, |c| c.list_cache_s);
+        s.dirs.get(dir).is_some_and(|d| d.entries.is_some() && now - d.fetched < ttl)
+    })
+}
+
+/// Size and kind of `path`: from the cache, else the parent folder's listing, else a `HEAD`.
 async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
     let other = StatError::Other;
     if let Some(s) = stat(path) {
@@ -290,7 +309,7 @@ async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
             }
             crate::fs::sleep(10).await;
         }
-        if stat(path).is_none() {
+        if stat(path).is_none() && !listing_fresh(parent) {
             STATE.with(|s| s.borrow_mut().dirs.entry(parent.to_string()).or_default().loading = true);
             let res = propfind(parent).await;
             if let Err(e) = &res {
@@ -394,10 +413,14 @@ pub async fn open_project(path: &str) -> Result<Value, String> {
     if r.status() != 200 {
         return Err(format!("{path}: the server answered {}", r.status()));
     }
-    crate::remote_upload::note_opened(path, header(&r, "etag"));
+    let etag = header(&r, "etag");
     let bytes = read_body(&r, remote_dav::MAX_PROJECT_BYTES as usize).await?;
     crate::remote_import::prefetch_media(&bytes).await;
     crate::fs::put(path, bytes);
     let path = path.to_string();
-    crate::import::on_ui(move |w, _| w.app.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string())).await
+    let opened_path = path.clone();
+    let opened = crate::import::on_ui(move |w, _| w.app.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string())).await?;
+    // only a project that opened is tracked: a failed open must not arm later saves with this ETag
+    crate::remote_upload::note_opened(&opened_path, etag);
+    Ok(opened)
 }
