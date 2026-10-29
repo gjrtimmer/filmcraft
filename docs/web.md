@@ -104,6 +104,20 @@ eframe creates a WebGPU device when the browser has one, else WebGL2. FilmCraft'
 (`filmcraft-gpu`) is used on WebGPU; on WebGL2 frames are composited on the CPU. Check
 `filmcraft.info().backend` and `.compositor`.
 
+## Page config: `filmcraft-config.json`
+
+An optional file next to `index.html`, fetched once at start-up (a missing or invalid file changes
+nothing). Keys:
+
+| Key | |
+|---|---|
+| `"remote"` | Remote storage ([below](#remote-storage)); a file with only `startup` leaves it off. |
+| `"startup"` | `"empty"` opens an empty session instead of the demo project; `"demo"` (the default) opens the demo. Unsaved changes from an earlier session are still recovered first. An unknown value is ignored with a console warning. `?empty` and `?demo` in the URL override it (`?empty` wins). |
+
+```json
+{"startup":"empty"}
+```
+
 ## Remote storage
 
 The page can mount folders of a WebDAV server as virtual paths, so projects and media live on a

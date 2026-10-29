@@ -24,6 +24,7 @@ pub mod download_pacing;
 pub mod fs;
 pub mod import;
 pub mod opfs;
+pub mod page_config;
 pub mod recovery;
 pub mod recovery_policy;
 pub mod remote;
@@ -31,6 +32,7 @@ pub mod remote_config;
 pub mod remote_dav;
 pub mod remote_upload;
 pub mod remote_write;
+pub mod web_config;
 pub mod webcodecs;
 
 use std::cell::RefCell;
@@ -157,7 +159,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     api::install()?;
     import::install_drop_handlers()?;
 
-    let demo = !query_flag("empty");
+    let demo = web_config::open_demo(query_flag("empty"), query_flag("demo"), page_config::startup());
     let mut web_options = eframe::WebOptions::default();
     // `?webgl`: WebGL2 only. The page reloads with it when starting on WebGPU fails (an adapter
     // whose device can't be created, a driver the browser rejects…); see `index.html`.
