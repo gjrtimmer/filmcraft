@@ -79,3 +79,7 @@ web-sys = { version = "0.3", features = [
     "Window",
     "WritableStream",
 ] }
+
+# The pure page-config parsing is tested natively (`tests/it`).
+[dev-dependencies]
+serde_json = { workspace = true }
