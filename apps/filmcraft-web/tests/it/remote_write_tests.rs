@@ -127,15 +127,20 @@ fn failures_say_what_to_do() {
 fn a_saved_version_is_tied_to_the_upload() {
     use crate::remote_write::{SavedVersion as V, head_part, saved_version};
     let v = |s: &str| V::Etag(s.to_string());
-    assert_eq!(saved_version(Some("\"m\""), Some("\"p\""), Some("\"x\"")), v("\"m\""));
-    assert_eq!(saved_version(None, Some("\"p\""), Some("\"p\"")), v("\"p\""));
+    assert_eq!(saved_version(Some("\"m\""), Some("\"p\""), Some(Some("\"x\""))), v("\"m\""));
+    // the move's own version needs no HEAD
+    assert_eq!(saved_version(Some("\"m\""), None, None), v("\"m\""));
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"p\""))), v("\"p\""));
     // someone wrote in between, or the upload's version is unknown or weak: not tied
-    assert_eq!(saved_version(None, Some("\"p\""), Some("\"x\"")), V::Unbound);
-    assert_eq!(saved_version(None, None, Some("\"x\"")), V::Unbound);
-    assert_eq!(saved_version(Some("W/\"m\""), Some("W/\"p\""), Some("W/\"p\"")), V::Unbound);
-    // a server without ETags is as when the file was opened
-    assert_eq!(saved_version(None, None, None), V::NoEtag);
-    assert_eq!(saved_version(None, Some("\"p\""), Some(" ")), V::NoEtag);
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"x\""))), V::Unbound);
+    assert_eq!(saved_version(None, None, Some(Some("\"x\""))), V::Unbound);
+    assert_eq!(saved_version(Some("W/\"m\""), Some("W/\"p\""), Some(Some("W/\"p\""))), V::Unbound);
+    // a failed HEAD shows nothing: never "no ETag"
+    assert_eq!(saved_version(None, Some("\"p\""), None), V::Unbound);
+    assert_eq!(saved_version(None, None, None), V::Unbound);
+    // a server that answers without ETags is as when the file was opened
+    assert_eq!(saved_version(None, None, Some(None)), V::NoEtag);
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some(" "))), V::NoEtag);
     let h = head_part(&cfg(), "/rw/x.fcproj", "a1b2").unwrap();
     assert_eq!((h.method, h.url.as_str()), ("HEAD", "/dav/rw/x.fcproj.a1b2.part"));
 }

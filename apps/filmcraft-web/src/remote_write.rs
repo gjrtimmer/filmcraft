@@ -134,14 +134,16 @@ pub enum SavedVersion {
 }
 
 /// Which version a save made. `moved` is the `MOVE` answer's ETag, `part` the upload's ETag
-/// before the move (its `PUT` answer or a `HEAD`), `head` the target's ETag after the move. Only a
-/// strong ETag counts: the `MOVE`'s own, or the target's when it equals the part's (the move kept
-/// the bytes, so a writer in between would have changed it).
-pub fn saved_version(moved: Option<&str>, part: Option<&str>, head: Option<&str>) -> SavedVersion {
+/// before the move (its `PUT` answer or a `HEAD`), `head` the target's `HEAD` after the move (`None`:
+/// that request failed; `Some(None)`: it answered without an ETag). Only a strong ETag counts: the
+/// `MOVE`'s own, or the target's when it equals the part's (the move kept the bytes, so a writer in
+/// between would have changed it). A failed `HEAD` shows nothing about the target: not tied.
+pub fn saved_version(moved: Option<&str>, part: Option<&str>, head: Option<Option<&str>>) -> SavedVersion {
     let strong = |e: Option<&str>| e.map(str::trim).filter(|e| !e.is_empty() && !e.starts_with("W/")).map(str::to_string);
     if let Some(m) = strong(moved) {
         return SavedVersion::Etag(m);
     }
+    let Some(head) = head else { return SavedVersion::Unbound };
     match (head.map(str::trim).filter(|h| !h.is_empty()), strong(part)) {
         (None, _) => SavedVersion::NoEtag,
         (Some(h), Some(p)) if p == h => SavedVersion::Etag(p),
