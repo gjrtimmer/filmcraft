@@ -131,13 +131,19 @@ pub enum SavedVersion {
     /// The server's ETag cannot be tied to this save (someone may have written in between): the
     /// record is dropped, so the next save is a conflict or Save As, never a silent overwrite.
     Unbound,
+    /// The target has an ETag that differs from the upload's (some servers, such as rclone's WebDAV,
+    /// derive it from the modification time and so give the moved file a new one): only its bytes can
+    /// tell whether it is this save's. See [`verify_saved`].
+    Verify,
 }
 
 /// Which version a save made. `moved` is the `MOVE` answer's ETag, `part` the upload's ETag
 /// before the move (its `PUT` answer or a `HEAD`), `head` the target's `HEAD` after the move (`None`:
 /// that request failed; `Some(None)`: it answered without an ETag). Only a strong ETag counts: the
 /// `MOVE`'s own, or the target's when it equals the part's (the move kept the bytes, so a writer in
-/// between would have changed it). A failed `HEAD` shows nothing about the target: not tied.
+/// between would have changed it). A target ETag that differs (or a part ETag that is unknown or weak)
+/// is [`SavedVersion::Verify`]: the caller compares the target's bytes with the upload. A failed `HEAD`
+/// shows nothing about the target: not tied.
 pub fn saved_version(moved: Option<&str>, part: Option<&str>, head: Option<Option<&str>>) -> SavedVersion {
     let strong = |e: Option<&str>| e.map(str::trim).filter(|e| !e.is_empty() && !e.starts_with("W/")).map(str::to_string);
     if let Some(m) = strong(moved) {
@@ -147,6 +153,26 @@ pub fn saved_version(moved: Option<&str>, part: Option<&str>, head: Option<Optio
     match (head.map(str::trim).filter(|h| !h.is_empty()), strong(part)) {
         (None, _) => SavedVersion::NoEtag,
         (Some(h), Some(p)) if p == h => SavedVersion::Etag(p),
+        _ => SavedVersion::Verify,
+    }
+}
+
+/// `GET` of the whole target, to compare its bytes with an upload ([`verify_saved`]).
+pub fn get_target(cfg: &Config, path: &str) -> Result<Req, String> {
+    Ok(Req { method: "GET", url: cfg.url_for(path)?, headers: Vec::new() })
+}
+
+/// The version a save made when the target's ETag differs from the upload's. `got` is the target's
+/// `GET` answer: its status, ETag (from the same response as the bytes) and bytes (`None`: the request
+/// failed or the body was too large). The ETag is bound only when the target holds exactly the bytes
+/// uploaded: another writer's file (even of the same size) is never bound, so the next save stays a
+/// conflict instead of overwriting it. A weak ETag is fine here: the bytes were just checked.
+pub fn verify_saved(uploaded: &[u8], got: Option<(u16, Option<&str>, &[u8])>) -> SavedVersion {
+    match got {
+        Some((200, etag, body)) if body == uploaded => match etag.map(str::trim).filter(|e| !e.is_empty()) {
+            Some(e) => SavedVersion::Etag(e.to_string()),
+            None => SavedVersion::NoEtag,
+        },
         _ => SavedVersion::Unbound,
     }
 }
