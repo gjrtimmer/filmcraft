@@ -51,6 +51,10 @@ pub struct HostHooks {
     pub cursor_screen_position: Option<Box<dyn Fn() -> Option<(i32, i32)>>>,
     pub pick_save: Option<Box<dyn FnMut(&str) -> Option<String>>>,
     pub pick_open_project: Option<Box<dyn FnMut() -> Option<String>>>,
+    /// Open the project at a path the host has to prepare first (the web build fetches a project
+    /// from remote storage, with the sizes of its media, before `file.open`). Called by
+    /// [`FilmcraftApp::open_project_path`]; without it the path opens with `file.open` directly.
+    pub open_project: Option<Box<dyn FnMut(&str)>>,
     /// Save dialog with a filter: (filter name, extensions, suggested file name) → path. The
     /// suggestion may be a full path, and the dialog then starts in its folder.
     pub pick_save_as: Option<Box<dyn FnMut(&str, &[&str], &str) -> Option<String>>>,

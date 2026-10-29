@@ -8,6 +8,21 @@ impl FilmcraftApp {
         panels::project::view_of(self, panels::project::shown_inst(self)).bin
     }
 
+    /// Open the project at `path`: through [`crate::HostHooks::open_project`] when the host has one
+    /// (it opens the project itself, later), else with the `file.open` command. Every open-by-path
+    /// goes through here (picker result, Open Recent, Home, Media Browser).
+    pub fn open_project_path(&mut self, path: &str) -> Result<Value, String> {
+        if let Some(open) = self.hooks.open_project.as_mut() {
+            open(path);
+            return Ok(json!({"path": path, "pending": true}));
+        }
+        let r = self.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string());
+        if let Err(e) = &r {
+            self.ui.status = e.clone();
+        }
+        r
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {
@@ -54,7 +69,7 @@ impl FilmcraftApp {
             }
             "file.open" => self.pick(FileDialog::OpenProject, |app, paths| {
                 let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
-                app.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string())
+                app.open_project_path(&path)
             }),
             "graphics.newFromFile" => {
                 let exts: Vec<&str> = filmcraft_media::STILL_EXTENSIONS.iter().chain(filmcraft_media::VIDEO_EXTENSIONS).copied().collect();
