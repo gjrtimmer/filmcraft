@@ -14,3 +14,7 @@ mod remote_dav_tests;
 #[path = "../../src/remote_write.rs"]
 mod remote_write;
 mod remote_write_tests;
+#[allow(dead_code)]
+#[path = "../../src/web_config.rs"]
+mod web_config;
+mod web_config_tests;
