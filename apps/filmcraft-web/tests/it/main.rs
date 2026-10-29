@@ -8,6 +8,10 @@ mod web_config;
 mod web_config_tests;
 
 #[allow(dead_code)]
+#[path = "../../src/atomwalk.rs"]
+mod atomwalk;
+mod atomwalk_tests;
+#[allow(dead_code)]
 #[path = "../../src/readahead.rs"]
 mod readahead;
 mod readahead_tests;

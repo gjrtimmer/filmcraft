@@ -50,11 +50,13 @@ pub async fn prefetch_media(project: &[u8]) {
 
 /// [`prefetch_media`] that stops starting new lookups once `deadline` has passed (the rest stays
 /// unresolved, so the engine reports it offline). A request already running is aborted when
-/// `deadline` passes. WebM, Matroska and QuickTime files also get their container index loaded
-/// (as an import does), up to [`WARM_BUDGET`] bytes of files, so opening the project does not
-/// start with a scan of the whole file.
+/// `deadline` passes. Only the sizes gate the caller. WebM, Matroska and QuickTime files also get
+/// their container index loaded (as an import does), up to [`WARM_BUDGET`] bytes of files, but in
+/// the background: the project opens at once and a medium whose bytes are still on their way
+/// shows as loading (never missing) until they arrive.
 pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Instant>) {
     let mut warm_left = WARM_BUDGET;
+    let mut warm = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for p in media_paths(project).into_iter().filter(|p| remote::is_remote(p)).take(MEDIA_MAX) {
         if deadline.is_some_and(|d| web_time::Instant::now() >= d) {
@@ -69,13 +71,18 @@ pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Ins
                 // registers the file's chunk cache; a file the engine cannot read is not warmed
                 if crate::fs::WebServices.reader(&p).is_some_and(|r| r.is_ok()) {
                     warm_left -= st.size;
-                    crate::import::prewarm(&p, st.size).await;
+                    warm.push((p, st.size));
                 }
             }
             Ok(_) => {}
             Err(e) => log::info!("remote media {p}: {e}"),
         }
     }
+    wasm_bindgen_futures::spawn_local(async move {
+        for (p, size) in warm {
+            crate::import::prewarm(&p, size).await;
+        }
+    });
 }
 
 /// Load the listing of `dir` and of the folders below it (their files' sizes come with them).
