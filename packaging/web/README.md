@@ -52,6 +52,12 @@ location /filmcraft/ {
 
 Local test: `python3 -m http.server 8765` inside the folder, then open http://localhost:8765/.
 
+## Page config (optional)
+
+`filmcraft-config.json` next to `index.html` (serve it with `Cache-Control: no-cache`) can set
+`"startup": "empty"` to open an empty session instead of the demo project (default `"demo"`);
+see [docs/web.md](../../docs/web.md#page-config-filmcraft-configjson).
+
 ## Embedding in a page (iframe)
 
 ```html
