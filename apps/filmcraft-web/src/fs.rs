@@ -230,7 +230,46 @@ pub async fn prefetch(path: &str, a: u64, b: u64) {
             sleep(2).await;
         }
     }
-    idle().await;
+    // Wait for these chunks only: read-ahead of other reads (or other files) must not hold a
+    // header hop back. A chunk that is neither cached nor on its way (failed, evicted) ends the wait.
+    loop {
+        let done = FS.with(|fs| {
+            let fs = fs.borrow();
+            (c0..c1).all(|c| fs.chunks.contains_key(&(id, c)) || !fs.inflight.contains(&(id, c)))
+        });
+        if done {
+            return;
+        }
+        sleep(4).await;
+    }
+}
+
+/// The bytes `[offset, offset + len)` of a registered file when every chunk covering them is
+/// already cached, else `None`. Unlike a [`BlobReader`] read this starts no fetch and no
+/// read-ahead, so container walks (atom headers) cost exactly the chunks they prefetched.
+pub fn cached_range(path: &str, offset: u64, len: usize) -> Option<Vec<u8>> {
+    FS.with(|fs| {
+        let fs = fs.borrow();
+        let (id, size, chunk) = match fs.entries.get(path)? {
+            Entry::Blob { id, size } => (*id, *size, CHUNK),
+            Entry::Remote { id, size } => (*id, *size, fs.chunk_of.get(id).copied().unwrap_or(CHUNK)),
+            Entry::Mem(b) => return b.get(usize::try_from(offset).ok()?..).map(|t| t[..len.min(t.len())].to_vec()),
+        };
+        let end = offset.checked_add(len as u64)?.min(size);
+        let mut out = Vec::with_capacity(len.min(1 << 20));
+        let mut pos = offset;
+        while pos < end {
+            let (d, _) = fs.chunks.get(&(id, pos / chunk))?;
+            let a = usize::try_from(pos - pos / chunk * chunk).ok()?;
+            let n = usize::try_from(end - pos).ok()?.min(d.len().checked_sub(a)?);
+            if n == 0 {
+                return None;
+            }
+            out.extend_from_slice(&d[a..a + n]);
+            pos += n as u64;
+        }
+        Some(out)
+    })
 }
 
 impl Fs {

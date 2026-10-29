@@ -2,6 +2,10 @@ mod download_pacing;
 mod recovery_policy;
 
 #[allow(dead_code)]
+#[path = "../../src/atomwalk.rs"]
+mod atomwalk;
+mod atomwalk_tests;
+#[allow(dead_code)]
 #[path = "../../src/readahead.rs"]
 mod readahead;
 mod readahead_tests;
