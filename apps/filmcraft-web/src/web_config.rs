@@ -20,7 +20,9 @@ pub enum Startup {
 /// value other than `"empty"` or `"demo"`, or a file that is not a JSON object.
 pub fn parse_startup(bytes: &[u8]) -> Result<Option<Startup>, String> {
     let v: Value = serde_json::from_slice(bytes).map_err(|e| format!("invalid JSON: {e}"))?;
-    match v.get("startup") {
+    // A top-level array, string or number has no keys: reject it instead of reading it as "no startup".
+    let obj = v.as_object().ok_or("config is not a JSON object")?;
+    match obj.get("startup") {
         None => Ok(None),
         Some(Value::String(s)) if s == "empty" => Ok(Some(Startup::Empty)),
         Some(Value::String(s)) if s == "demo" => Ok(Some(Startup::Demo)),
