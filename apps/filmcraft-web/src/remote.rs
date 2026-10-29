@@ -51,7 +51,6 @@ struct DirState {
 #[derive(Default)]
 struct State {
     cfg: Option<Config>,
-    startup: Option<crate::web_config::Startup>,
     origin: String,
     stats: HashMap<String, Stat>,
     dirs: HashMap<String, DirState>,
@@ -136,13 +135,7 @@ pub(crate) fn cfg_and_origin() -> Result<(Config, String), String> {
     })
 }
 
-/// The `startup` key of the config file (`None`: absent or invalid).
-pub fn startup() -> Option<crate::web_config::Startup> {
-    STATE.with(|s| s.borrow().startup)
-}
-
-/// Read `./filmcraft-config.json` once: the `startup` key, and the remote mounts. Remote storage
-/// stays off when the file is missing or invalid, or has no `remote` key.
+/// Read `./filmcraft-config.json`; remote storage stays off when it is missing or invalid.
 pub async fn load_config() {
     let Some(loc) = web_sys::window().map(|w| w.location()) else { return };
     let (origin, path) = (loc.origin().unwrap_or_default(), loc.pathname().unwrap_or_default());
@@ -152,18 +145,7 @@ pub async fn load_config() {
         Ok(r) => Err(format!("status {}", r.status())),
         Err(e) => Err(e),
     };
-    let bytes = match bytes {
-        Ok(b) => b,
-        Err(e) => return log::info!("no page config: {e}"),
-    };
-    match crate::web_config::parse_startup(&bytes) {
-        Ok(v) => STATE.with(|s| s.borrow_mut().startup = v),
-        Err(e) => log::warn!("filmcraft-config.json: {e}; ignored"),
-    }
-    if !crate::web_config::has_remote(&bytes) {
-        return;
-    }
-    match remote_config::parse(&bytes, &origin, &base_dir) {
+    match bytes.and_then(|b| remote_config::parse(&b, &origin, &base_dir)) {
         Ok(cfg) => {
             log::info!("remote storage: {} mount(s)", cfg.mounts.len());
             STATE.with(|s| {
