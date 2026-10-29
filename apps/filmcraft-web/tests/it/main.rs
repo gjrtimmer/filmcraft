@@ -6,6 +6,14 @@ mod recovery_policy;
 mod atomwalk;
 mod atomwalk_tests;
 #[allow(dead_code)]
+#[path = "../../src/focus.rs"]
+mod focus;
+mod focus_tests;
+#[allow(dead_code)]
+#[path = "../../src/prewarm_plan.rs"]
+mod prewarm_plan;
+mod prewarm_plan_tests;
+#[allow(dead_code)]
 #[path = "../../src/readahead.rs"]
 mod readahead;
 mod readahead_tests;

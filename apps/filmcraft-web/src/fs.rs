@@ -54,6 +54,8 @@ struct Fs {
     chunk_of: HashMap<u32, u64>,
     /// Misses of each file, to tell a sequential scan from random reads.
     scans: HashMap<u32, crate::readahead::Scan>,
+    /// The files of the active sequence, fetched with priority while a project loads.
+    focus: crate::focus::Focus,
     /// Resolvers of [`next_data`] waits, called when a chunk arrives or fails.
     waiters: Vec<js_sys::Function>,
     next_id: u32,
@@ -131,6 +133,24 @@ fn register_remote(path: &str, size: u64, chunk: u64) -> u32 {
         fs.entries.insert(path.to_string(), Entry::Remote { id, size });
         id
     })
+}
+
+/// Make `files` (the active sequence's media) the focus; `loading` of them are being warmed up
+/// ([`focus_done`] ends that). Other files fetch only a little while a focus file loads.
+pub fn set_focus(files: &[String], loading: &[String]) {
+    FS.with(|fs| fs.borrow_mut().focus.set(files, loading));
+}
+
+/// A focus file finished warming up.
+pub fn focus_done(path: &str) {
+    FS.with(|fs| fs.borrow_mut().focus.finish(path));
+}
+
+/// How the cache treats file `id` now: see [`crate::focus`]. A Blob is never throttled.
+fn class_of(fs: &Fs, id: u32) -> crate::focus::Class {
+    let Some((path, _)) = fs.remote.get(&id) else { return crate::focus::Class::Normal };
+    let busy = fs.inflight.iter().any(|(i, _)| fs.remote.get(i).is_some_and(|(p, _)| fs.focus.contains(p)));
+    fs.focus.class(path, busy)
 }
 
 /// Put bytes at a path (no download).
@@ -224,9 +244,12 @@ pub async fn prefetch(path: &str, a: u64, b: u64) {
     };
     let (c0, c1) = (a / chunk, b.min(size).div_ceil(chunk));
     for c in c0..c1 {
-        request(id, c);
+        // a throttled request (another file while a focus file loads) is retried
+        while !request(id, c) {
+            sleep(4).await;
+        }
         // keep a bounded number of reads in flight
-        while inflight() as u64 >= limit {
+        while inflight() as u64 >= FS.with(|fs| class_of(&fs.borrow(), id)).parallel(limit) {
             sleep(2).await;
         }
     }
@@ -299,11 +322,19 @@ enum Source {
     Remote(String, u64),
 }
 
-/// Start fetching chunk `c` of file `id` (a Blob or a remote file) unless it is cached or already on its way.
-fn request(id: u32, c: u64) {
+/// Start fetching chunk `c` of file `id` (a Blob or a remote file) unless it is cached or already
+/// on its way. `false` when it was not started because other files may fetch only a little while a
+/// focus file loads: the caller asks again later.
+fn request(id: u32, c: u64) -> bool {
+    let mut throttled = false;
     let source = FS.with(|fs| {
         let mut fs = fs.borrow_mut();
         if fs.chunks.contains_key(&(id, c)) || fs.inflight.contains(&(id, c)) {
+            return None;
+        }
+        let others = fs.inflight.iter().filter(|(i, _)| *i != id && fs.remote.get(i).is_some_and(|(p, _)| !fs.focus.contains(p))).count();
+        if !class_of(&fs, id).may_start(others) {
+            throttled = true;
             return None;
         }
         let source = match (fs.blobs.get(&id), fs.remote.get(&id)) {
@@ -315,7 +346,7 @@ fn request(id: u32, c: u64) {
         fs.inflight.insert((id, c));
         Some(source)
     });
-    let Some((source, chunk)) = source else { return };
+    let Some((source, chunk)) = source else { return !throttled };
     let size = match &source {
         Source::Blob(b) => b.size() as u64,
         Source::Remote(_, s) => *s,
@@ -358,6 +389,7 @@ fn request(id: u32, c: u64) {
             w();
         }
     });
+    true
 }
 
 /// Random-access reads of a registered Blob through the chunk cache.
@@ -396,9 +428,10 @@ impl ByteReader for BlobReader {
             // file, retried from its start): fetch many chunks at once
             let ahead = FS.with(|fs| {
                 let mut fs = fs.borrow_mut();
+                let class = class_of(&fs, self.id);
                 let scan = fs.scans.entry(self.id).or_default();
                 scan.note_miss(missing[0], self.parallel);
-                crate::readahead::ahead(scan, self.parallel, self.chunk, CACHE_BUDGET)
+                class.ahead(scan, self.parallel, self.chunk, CACHE_BUDGET)
             });
             for c in missing.iter().copied().chain(c1 + 1..=(c1 + ahead).min(last)) {
                 request(self.id, c);
@@ -426,7 +459,9 @@ impl ByteReader for BlobReader {
         }
         // read-ahead for sequential access (as wide as the scan that was seen on this file)
         let ahead = FS.with(|fs| {
-            fs.borrow().scans.get(&self.id).map_or(crate::readahead::BASE_AHEAD, |s| crate::readahead::ahead(s, self.parallel, self.chunk, CACHE_BUDGET))
+            let fs = fs.borrow();
+            let class = class_of(&fs, self.id);
+            fs.scans.get(&self.id).map_or(crate::readahead::BASE_AHEAD, |s| class.ahead(s, self.parallel, self.chunk, CACHE_BUDGET))
         });
         for c in c1 + 1..=(c1 + ahead).min(last) {
             request(self.id, c);
