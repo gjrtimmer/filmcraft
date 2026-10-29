@@ -116,6 +116,39 @@ fn same_etag(a: &str, b: &str) -> bool {
     n(a) == n(b)
 }
 
+/// `HEAD` of upload `token`'s `.part` file: the ETag its bytes have before the move.
+pub fn head_part(cfg: &Config, path: &str, token: &str) -> Result<Req, String> {
+    Ok(Req { method: "HEAD", url: cfg.url_for(&part_path(path, token)?)?, headers: Vec::new() })
+}
+
+/// The version of the target a finished save leaves in this session's record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedVersion {
+    /// The ETag of what this save wrote.
+    Etag(String),
+    /// The server sends no ETags at all: a change cannot be detected (as for a file opened so).
+    NoEtag,
+    /// The server's ETag cannot be tied to this save (someone may have written in between): the
+    /// record is dropped, so the next save is a conflict or Save As, never a silent overwrite.
+    Unbound,
+}
+
+/// Which version a save made. `moved` is the `MOVE` answer's ETag, `part` the upload's ETag
+/// before the move (its `PUT` answer or a `HEAD`), `head` the target's ETag after the move. Only a
+/// strong ETag counts: the `MOVE`'s own, or the target's when it equals the part's (the move kept
+/// the bytes, so a writer in between would have changed it).
+pub fn saved_version(moved: Option<&str>, part: Option<&str>, head: Option<&str>) -> SavedVersion {
+    let strong = |e: Option<&str>| e.map(str::trim).filter(|e| !e.is_empty() && !e.starts_with("W/")).map(str::to_string);
+    if let Some(m) = strong(moved) {
+        return SavedVersion::Etag(m);
+    }
+    match (head.map(str::trim).filter(|h| !h.is_empty()), strong(part)) {
+        (None, _) => SavedVersion::NoEtag,
+        (Some(h), Some(p)) if p == h => SavedVersion::Etag(p),
+        _ => SavedVersion::Unbound,
+    }
+}
+
 /// Decide from the target's `HEAD` answer whether the move may go ahead.
 pub fn precondition(known: &Known, status: u16, etag: Option<&str>) -> Precondition {
     match (known, status) {
