@@ -23,6 +23,7 @@ filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-isobmff = { workspace = true }
 filmcraft-format = { workspace = true }
+filmcraft-project = { workspace = true }
 filmcraft-time = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
@@ -93,6 +94,10 @@ web-sys = { version = "0.3", features = [
 
 # The pure remote-storage modules are tested natively (`tests/it`).
 [dev-dependencies]
+filmcraft-project = { workspace = true }
+filmcraft-format = { workspace = true }
+filmcraft-media = { workspace = true }
+filmcraft-time = { workspace = true }
 serde_json = { workspace = true }
 roxmltree = { workspace = true }
 chrono = { workspace = true }

@@ -27,20 +27,9 @@ const WAKE_MS: i32 = 250;
 /// Bytes of media files one project load warms up: half the chunk cache, so nothing it fetched is evicted again.
 const WARM_BUDGET: u64 = (crate::fs::CACHE_BUDGET / 2) as u64;
 
-/// The media (and proxy) file paths a project file refers to.
-fn media_paths(bytes: &[u8]) -> Vec<String> {
-    let Ok(loaded) = filmcraft_format::decode(bytes) else { return Vec::new() };
-    let mut out = Vec::new();
-    for it in loaded.project.items.values() {
-        let Some(m) = it.as_media() else { continue };
-        for r in std::iter::once(&m.media).chain(m.proxy.as_ref()) {
-            if let filmcraft_engine::project::MediaRef::File { path } = r {
-                out.push(path.clone());
-            }
-        }
-    }
-    out
-}
+/// Longest wait (milliseconds) for the active sequence's media before the other sequences' media
+/// starts loading anyway (it is throttled while the active one still loads).
+const REST_AFTER_MS: u128 = 20_000;
 
 /// Fetch the size of every remote file a project (its bytes) refers to, so the synchronous
 /// `Services` find them when it opens. Missing ones stay missing: the engine reports them offline.
@@ -53,12 +42,18 @@ pub async fn prefetch_media(project: &[u8]) {
 /// `deadline` passes. Only the sizes gate the caller. WebM, Matroska and QuickTime files also get
 /// their container index loaded (as an import does), up to [`WARM_BUDGET`] bytes of files, but in
 /// the background: the project opens at once and a medium whose bytes are still on their way
-/// shows as loading (never missing) until they arrive.
+/// shows as loading (never missing) until they arrive. The media of the active sequence goes
+/// first ([`crate::prewarm_plan`]): the other sequences' media starts when it is loaded (or after
+/// [`REST_AFTER_MS`]), and meanwhile other files fetch only a little ([`crate::focus`]).
 pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Instant>) {
+    let plan = crate::prewarm_plan::plan_bytes(project);
+    let nfocus = plan.focus.len();
+    let remote_focus: Vec<String> = plan.focus.iter().filter(|p| remote::is_remote(p)).cloned().collect();
+    crate::fs::set_focus(&remote_focus, &[]);
     let mut warm_left = WARM_BUDGET;
-    let mut warm = Vec::new();
+    let (mut warm_focus, mut warm_rest) = (Vec::new(), Vec::new());
     let mut seen = std::collections::HashSet::new();
-    for p in media_paths(project).into_iter().filter(|p| remote::is_remote(p)).take(MEDIA_MAX) {
+    for (i, p) in plan.focus.into_iter().chain(plan.rest).enumerate().filter(|(_, p)| remote::is_remote(p)).take(MEDIA_MAX) {
         if deadline.is_some_and(|d| web_time::Instant::now() >= d) {
             log::info!("remote media: time budget used up, the rest stays unresolved");
             break;
@@ -71,15 +66,31 @@ pub async fn prefetch_media_until(project: &[u8], deadline: Option<web_time::Ins
                 // registers the file's chunk cache; a file the engine cannot read is not warmed
                 if crate::fs::WebServices.reader(&p).is_some_and(|r| r.is_ok()) {
                     warm_left -= st.size;
-                    warm.push((p, st.size));
+                    let list = if i < nfocus { &mut warm_focus } else { &mut warm_rest };
+                    list.push((p, st.size));
                 }
             }
             Ok(_) => {}
             Err(e) => log::info!("remote media {p}: {e}"),
         }
     }
+    let loading: Vec<String> = warm_focus.iter().map(|(p, _)| p.clone()).collect();
+    crate::fs::set_focus(&remote_focus, &loading);
     wasm_bindgen_futures::spawn_local(async move {
-        for (p, size) in warm {
+        let left = std::rc::Rc::new(std::cell::Cell::new(warm_focus.len()));
+        for (p, size) in warm_focus {
+            let left = left.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                crate::import::prewarm(&p, size).await;
+                crate::fs::focus_done(&p);
+                left.set(left.get().saturating_sub(1));
+            });
+        }
+        let started = web_time::Instant::now();
+        while left.get() > 0 && started.elapsed().as_millis() < REST_AFTER_MS {
+            crate::fs::sleep(20).await;
+        }
+        for (p, size) in warm_rest {
             crate::import::prewarm(&p, size).await;
         }
     });

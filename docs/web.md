@@ -152,7 +152,9 @@ What it gives you:
   see `remote.chunkBytes`). Reads that miss at a frontier moving forward, such as a Matroska open
   scanning every cluster header, fetch `remote.parallel` chunks ahead instead of three, and the
   retries of an import run again as soon as a chunk arrives. Opening a remote project also loads the
-  container index of its WebM, Matroska and QuickTime media. The server
+  container index of its WebM, Matroska and QuickTime media, and the media of the active sequence
+  (the clips under its playhead first) is fetched first: other sequences' media starts when it is
+  loaded, and meanwhile other files, such as Project panel thumbnails, fetch only a little. The server
   must answer `206 Partial Content` with a matching `Content-Range`; a `200` full body is refused
   for media.
 - **File ▸ Open Remote Project…**, **Import from Remote…** and **Save As Remote…** (and the Home
