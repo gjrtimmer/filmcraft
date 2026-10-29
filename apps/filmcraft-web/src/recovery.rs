@@ -129,3 +129,9 @@ pub async fn restore_media() -> usize {
     }
     n
 }
+
+/// Before a recovered snapshot opens: fetch the sizes of the remote media it refers to, so they
+/// are found (or reported offline) when the project opens.
+pub async fn restat_remote_media(snapshot: &[u8]) {
+    crate::remote::prefetch_media(snapshot).await;
+}

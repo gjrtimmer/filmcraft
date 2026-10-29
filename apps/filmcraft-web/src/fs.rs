@@ -32,7 +32,15 @@ pub const CACHE_BUDGET: usize = 384 << 20;
 const WHOLE_FILE_MAX: u64 = 256 << 20;
 
 enum Entry {
-    Blob { id: u32, size: u64 },
+    Blob {
+        id: u32,
+        size: u64,
+    },
+    /// A file on a remote mount ([`crate::remote`]): read in chunks with `Range` requests.
+    Remote {
+        id: u32,
+        size: u64,
+    },
     Mem(Arc<[u8]>),
 }
 
@@ -40,6 +48,8 @@ enum Entry {
 struct Fs {
     entries: HashMap<String, Entry>,
     blobs: HashMap<u32, web_sys::Blob>,
+    /// Remote files by chunk-cache id: (virtual path, size).
+    remote: HashMap<u32, (String, u64)>,
     next_id: u32,
     chunks: HashMap<(u32, u64), (Arc<[u8]>, u64)>,
     bytes: usize,
@@ -99,6 +109,23 @@ pub fn register_blob(name: &str, blob: web_sys::Blob) -> String {
     })
 }
 
+/// The chunk-cache id of the remote file at `path`; a new one when its size changed.
+fn register_remote(path: &str, size: u64) -> u32 {
+    FS.with(|fs| {
+        let mut fs = fs.borrow_mut();
+        if let Some(Entry::Remote { id, size: s }) = fs.entries.get(path)
+            && *s == size
+        {
+            return *id;
+        }
+        let id = fs.next_id;
+        fs.next_id += 1;
+        fs.remote.insert(id, (path.to_string(), size));
+        fs.entries.insert(path.to_string(), Entry::Remote { id, size });
+        id
+    })
+}
+
 /// Put bytes at a path (no download).
 pub fn put(path: &str, data: Vec<u8>) {
     FS.with(|fs| fs.borrow_mut().entries.insert(path.to_string(), Entry::Mem(data.into())));
@@ -113,6 +140,7 @@ pub fn list() -> Vec<(String, u64, &'static str)> {
             .iter()
             .map(|(p, e)| match e {
                 Entry::Blob { size, .. } => (p.clone(), *size, "blob"),
+                Entry::Remote { size, .. } => (p.clone(), *size, "remote"),
                 Entry::Mem(b) => (p.clone(), b.len() as u64, "memory"),
             })
             .collect();
@@ -127,6 +155,7 @@ pub fn blob(path: &str) -> Option<web_sys::Blob> {
         let fs = fs.borrow();
         match fs.entries.get(path)? {
             Entry::Blob { id, .. } => fs.blobs.get(id).cloned(),
+            Entry::Remote { .. } => None,
             Entry::Mem(b) => bytes_to_blob(b, "application/octet-stream").ok(),
         }
     })
@@ -202,32 +231,47 @@ impl Fs {
     }
 }
 
-/// Start fetching chunk `c` of blob `id` unless it is cached or already on its way.
+/// Where a chunk comes from.
+enum Source {
+    Blob(web_sys::Blob),
+    Remote(String, u64),
+}
+
+/// Start fetching chunk `c` of file `id` (a Blob or a remote file) unless it is cached or already on its way.
 fn request(id: u32, c: u64) {
-    let blob = FS.with(|fs| {
+    let source = FS.with(|fs| {
         let mut fs = fs.borrow_mut();
         if fs.chunks.contains_key(&(id, c)) || fs.inflight.contains(&(id, c)) {
             return None;
         }
-        let blob = fs.blobs.get(&id)?.clone();
+        let source = match (fs.blobs.get(&id), fs.remote.get(&id)) {
+            (Some(b), _) => Source::Blob(b.clone()),
+            (None, Some((p, s))) => Source::Remote(p.clone(), *s),
+            (None, None) => return None,
+        };
         fs.failed.remove(&(id, c));
         fs.inflight.insert((id, c));
-        Some(blob)
+        Some(source)
     });
-    let Some(blob) = blob else { return };
-    let size = blob.size() as u64;
+    let Some(source) = source else { return };
+    let size = match &source {
+        Source::Blob(b) => b.size() as u64,
+        Source::Remote(_, s) => *s,
+    };
     let (a, b) = (c * CHUNK, ((c + 1) * CHUNK).min(size));
-    let fut = blob.slice_with_f64_and_f64(a as f64, b as f64).map(|s| JsFuture::from(s.array_buffer()));
     wasm_bindgen_futures::spawn_local(async move {
-        let r = match fut {
-            Ok(f) => f.await.map(|buf| js_sys::Uint8Array::new(&buf).to_vec()),
-            Err(e) => Err(e),
+        let r: Result<Vec<u8>, String> = match source {
+            Source::Blob(blob) => match blob.slice_with_f64_and_f64(a as f64, b as f64) {
+                Ok(s) => JsFuture::from(s.array_buffer()).await.map(|buf| js_sys::Uint8Array::new(&buf).to_vec()).map_err(|e| format!("{e:?}")),
+                Err(e) => Err(format!("{e:?}")),
+            },
+            Source::Remote(path, size) => crate::remote::fetch_range(&path, a, b.saturating_sub(a), size).await,
         };
         let wake = FS.with(|fs| {
             let mut fs = fs.borrow_mut();
             fs.inflight.remove(&(id, c));
-            // a blob replaced or dropped meanwhile: discard
-            if fs.blobs.contains_key(&id) {
+            // a file replaced or dropped meanwhile: discard
+            if fs.blobs.contains_key(&id) || fs.remote.contains_key(&id) {
                 match r {
                     Ok(v) => {
                         fs.clock += 1;
@@ -237,7 +281,7 @@ fn request(id: u32, c: u64) {
                         fs.evict();
                     }
                     Err(e) => {
-                        fs.failed.insert((id, c), format!("{e:?}"));
+                        fs.failed.insert((id, c), e);
                     }
                 }
             }
@@ -318,11 +362,20 @@ pub struct WebServices;
 
 impl WebServices {
     fn entry_reader(path: &str) -> io::Result<SharedReader> {
-        FS.with(|fs| match fs.borrow().entries.get(path) {
-            Some(Entry::Blob { id, size }) => Ok(Arc::new(BlobReader { id: *id, size: *size }) as SharedReader),
-            Some(Entry::Mem(b)) => Ok(Arc::new(MemReader(b.clone())) as SharedReader),
+        let local = FS.with(|fs| match fs.borrow().entries.get(path) {
+            Some(Entry::Blob { id, size }) => Some(Ok(Arc::new(BlobReader { id: *id, size: *size }) as SharedReader)),
+            Some(Entry::Mem(b)) => Some(Ok(Arc::new(MemReader(b.clone())) as SharedReader)),
+            Some(Entry::Remote { .. }) | None => None,
+        });
+        if let Some(r) = local {
+            return r;
+        }
+        // A remote file: its size comes from the listing/HEAD cache (a changed size is a new file).
+        match crate::remote::stat(path) {
+            Some(st) if st.is_dir => Err(io::Error::other(format!("{path}: is a directory"))),
+            Some(st) => Ok(Arc::new(BlobReader { id: register_remote(path, st.size), size: st.size }) as SharedReader),
             None => Err(not_found(path)),
-        })
+        }
     }
 }
 
@@ -336,6 +389,10 @@ impl Services for WebServices {
     }
 
     fn write_file(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        // a path on a remote mount: uploaded to the server (writable mounts) or refused (read-only)
+        if let Some(r) = crate::remote_upload::write(path, data) {
+            return r;
+        }
         if let Some(rel) = path.strip_prefix("/opfs/") {
             crate::opfs::write(rel.to_string(), data.to_vec());
         }
@@ -353,6 +410,9 @@ impl Services for WebServices {
     }
 
     fn write_file_new(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        if crate::remote::is_remote(path) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive creation on remote storage is unavailable"));
+        }
         if path.starts_with("/opfs/") {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive OPFS writes are unavailable"));
         }
@@ -389,6 +449,9 @@ impl Services for WebServices {
     /// The Media Browser lists the virtual file table: picked and dropped files under `/files`.
     fn list_entries(&self, dir: &str) -> Option<io::Result<Vec<filmcraft_engine::media_browser::DirEntry>>> {
         use filmcraft_engine::media_browser::DirEntry;
+        if let Some(r) = crate::remote::list(dir) {
+            return Some(r);
+        }
         let prefix = if dir.ends_with('/') { dir.to_string() } else { format!("{dir}/") };
         let out = FS.with(|fs| {
             let fs = fs.borrow();
@@ -405,7 +468,7 @@ impl Services for WebServices {
                     Some(_) => {}
                     None => {
                         let size = match e {
-                            Entry::Blob { size, .. } => *size,
+                            Entry::Blob { size, .. } | Entry::Remote { size, .. } => *size,
                             Entry::Mem(b) => b.len() as u64,
                         };
                         files.push(DirEntry { name: rest.to_string(), is_dir: false, size: Some(size), modified: None });
@@ -417,6 +480,11 @@ impl Services for WebServices {
             v
         });
         Some(Ok(out))
+    }
+
+    /// Each remote mount is a Network location.
+    fn volumes(&self) -> Vec<filmcraft_engine::media_browser::Volume> {
+        crate::remote::volumes()
     }
 
     fn home_dir(&self) -> Option<String> {

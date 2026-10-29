@@ -26,6 +26,11 @@ pub mod import;
 pub mod opfs;
 pub mod recovery;
 pub mod recovery_policy;
+pub mod remote;
+pub mod remote_config;
+pub mod remote_dav;
+pub mod remote_upload;
+pub mod remote_write;
 pub mod webcodecs;
 
 use std::cell::RefCell;
@@ -138,9 +143,15 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     set_info("frameWorkers", json!("cooperative"));
     set_info("opfs", json!(opfs::available()));
 
+    // Same-origin WebDAV mounts (optional `./filmcraft-config.json`).
+    remote::load_config().await;
+    set_info("remote", json!(remote::enabled()));
     // Media kept in OPFS by earlier sessions come back under their paths (recovery).
     let restored = if opfs::available() && !query_flag("fresh") { recovery::restore_media().await } else { 0 };
     let recovered = if query_flag("fresh") || query_flag("norecover") { None } else { recovery::load_snapshot().await };
+    if let Some((_, bytes)) = &recovered {
+        recovery::restat_remote_media(bytes).await;
+    }
     webcodecs::probe().await;
 
     api::install()?;
@@ -189,6 +200,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 }
                 let mut app = FilmcraftApp::new(session);
                 import::install_hooks(&mut app);
+                remote::install_hooks(&mut app);
                 // Settings ▸ General ▸ Interface Language ▸ System Language (#218): the browser's languages.
                 app.hooks.system_languages =
                     Some(Box::new(|| web_sys::window().map(|w| w.navigator().languages().iter().filter_map(|v| v.as_string()).collect()).unwrap_or_default()));
