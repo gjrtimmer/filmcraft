@@ -328,6 +328,7 @@ pub async fn open_project(path: &str) -> Result<Value, String> {
     if r.status() != 200 {
         return Err(format!("{path}: the server answered {}", r.status()));
     }
+    crate::remote_upload::note_opened(path, header(&r, "etag"));
     let bytes = read_body(&r, remote_dav::MAX_PROJECT_BYTES as usize).await?;
     prefetch_media(&bytes).await;
     crate::fs::put(path, bytes);
