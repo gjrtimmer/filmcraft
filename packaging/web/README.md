@@ -56,7 +56,9 @@ Local test: `python3 -m http.server 8765` inside the folder, then open http://lo
 
 `filmcraft-config.json` next to `index.html` (serve it with `Cache-Control: no-cache`) can set
 `"startup": "empty"` to open an empty session instead of the demo project (default `"demo"`);
-see [docs/web.md](../../docs/web.md#page-config-filmcraft-configjson).
+see [docs/web.md](https://github.com/storytold/filmcraft/blob/main/docs/web.md#page-config-filmcraft-configjson).
+The page requests the file with `no-cache`; under a path prefix the `_headers` rule needs the prefix too
+(the shipped file has a `/*/filmcraft-config.json` rule for it).
 
 ## Embedding in a page (iframe)
 
