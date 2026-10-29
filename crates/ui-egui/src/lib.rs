@@ -134,6 +134,10 @@ pub struct HostHooks {
     pub cursor_screen_position: Option<Box<dyn Fn() -> Option<(i32, i32)>>>,
     pub pick_save: Option<Box<dyn FnMut(&str) -> Option<String>>>,
     pub pick_open_project: Option<Box<dyn FnMut() -> Option<String>>>,
+    /// Open the project at a path the host has to prepare first (the web build fetches a project
+    /// from remote storage, with the sizes of its media, before `file.open`). Called by
+    /// [`FilmcraftApp::open_project_path`]; without it the path opens with `file.open` directly.
+    pub open_project: Option<Box<dyn FnMut(&str)>>,
     /// Save dialog with a filter: (filter name, extensions, suggested file name) → path. The
     /// suggestion may be a full path, and the dialog then starts in its folder.
     pub pick_save_as: Option<Box<dyn FnMut(&str, &[&str], &str) -> Option<String>>>,
@@ -1645,6 +1649,21 @@ impl FilmcraftApp {
         panels::project::view_of(self, panels::project::shown_inst(self)).bin
     }
 
+    /// Open the project at `path`: through [`HostHooks::open_project`] when the host has one (it
+    /// opens the project itself, later), else with the `file.open` command. Every open-by-path goes
+    /// through here (picker result, Open Recent, Home, Media Browser).
+    pub fn open_project_path(&mut self, path: &str) -> Result<Value, String> {
+        if let Some(open) = self.hooks.open_project.as_mut() {
+            open(path);
+            return Ok(json!({"path": path, "pending": true}));
+        }
+        let r = self.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string());
+        if let Err(e) = &r {
+            self.ui.status = e.clone();
+        }
+        r
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {
@@ -1691,7 +1710,7 @@ impl FilmcraftApp {
             }
             "file.open" => self.pick(FileDialog::OpenProject, |app, paths| {
                 let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
-                app.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string())
+                app.open_project_path(&path)
             }),
             "graphics.newFromFile" => {
                 let exts: Vec<&str> = filmcraft_media::STILL_EXTENSIONS.iter().chain(filmcraft_media::VIDEO_EXTENSIONS).copied().collect();

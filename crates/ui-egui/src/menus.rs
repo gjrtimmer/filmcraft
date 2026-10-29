@@ -583,7 +583,7 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     // File ▸ Open Recent
     if let Some(i) = id.strip_prefix("file.openRecent.") {
         let path = i.parse::<usize>().ok().and_then(|i| app.session.prefs.general.recent_projects.get(i).cloned()).ok_or("no such recent project")?;
-        return invoke(app, ctx, "file.open", json!({"path": path}));
+        return app.open_project_path(&path);
     }
     if id == "file.clearRecent" {
         let mut next = app.session.prefs.clone();
