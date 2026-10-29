@@ -30,6 +30,7 @@ pub mod recovery_policy;
 pub mod remote;
 pub mod remote_config;
 pub mod remote_dav;
+pub mod remote_roots;
 pub mod remote_upload;
 pub mod remote_write;
 pub mod web_config;
