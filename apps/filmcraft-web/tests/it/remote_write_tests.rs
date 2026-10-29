@@ -131,10 +131,10 @@ fn a_saved_version_is_tied_to_the_upload() {
     // the move's own version needs no HEAD
     assert_eq!(saved_version(Some("\"m\""), None, None), v("\"m\""));
     assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"p\""))), v("\"p\""));
-    // someone wrote in between, or the upload's version is unknown or weak: not tied
-    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"x\""))), V::Unbound);
-    assert_eq!(saved_version(None, None, Some(Some("\"x\""))), V::Unbound);
-    assert_eq!(saved_version(Some("W/\"m\""), Some("W/\"p\""), Some(Some("W/\"p\""))), V::Unbound);
+    // the target's ETag differs from the upload's, or the upload's is unknown or weak: its bytes decide
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"x\""))), V::Verify);
+    assert_eq!(saved_version(None, None, Some(Some("\"x\""))), V::Verify);
+    assert_eq!(saved_version(Some("W/\"m\""), Some("W/\"p\""), Some(Some("W/\"p\""))), V::Verify);
     // a failed HEAD shows nothing: never "no ETag"
     assert_eq!(saved_version(None, Some("\"p\""), None), V::Unbound);
     assert_eq!(saved_version(None, None, None), V::Unbound);
@@ -143,4 +143,36 @@ fn a_saved_version_is_tied_to_the_upload() {
     assert_eq!(saved_version(None, Some("\"p\""), Some(Some(" "))), V::NoEtag);
     let h = head_part(&cfg(), "/rw/x.fcproj", "a1b2").unwrap();
     assert_eq!((h.method, h.url.as_str()), ("HEAD", "/dav/rw/x.fcproj.a1b2.part"));
+}
+
+/// A server that gives the moved target a new ETag must not make the next save of the same session
+/// fail, and a file another client wrote must still be a conflict.
+#[test]
+fn a_regenerated_etag_is_bound_only_when_the_bytes_are_ours() {
+    use crate::remote_write::{Known, Precondition, SavedVersion as V, get_target, precondition, saved_version, verify_saved};
+    let ours: &[u8] = b"project bytes";
+    let g = get_target(&cfg(), "/rw/x.fcproj").unwrap();
+    assert_eq!((g.method, g.url.as_str()), ("GET", "/dav/rw/x.fcproj"));
+    // MOVE answered without an ETag and the target got a new one: same bytes, so bind the new ETag
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"new\""))), V::Verify);
+    let bound = verify_saved(ours, Some((200, Some("\"new\""), ours)));
+    assert_eq!(bound, V::Etag("\"new\"".into()));
+    // the next save's HEAD shows that ETag: it goes ahead
+    assert_eq!(precondition(&Known::Etag("\"new\"".into()), 200, Some("\"new\"")), Precondition::Proceed { overwrite: true });
+    // another client changed it between our two saves: still a conflict
+    assert_eq!(precondition(&Known::Etag("\"new\"".into()), 200, Some("\"theirs\"")), Precondition::Conflict);
+    // the same ETag after the move needs no read-back
+    assert_eq!(saved_version(None, Some("\"p\""), Some(Some("\"p\""))), V::Etag("\"p\"".into()));
+    // no ETag at all on the target: as for a file opened without one
+    assert_eq!(saved_version(None, None, Some(None)), V::NoEtag);
+    assert_eq!(verify_saved(ours, Some((200, None, ours))), V::NoEtag);
+    // a weak ETag on matching bytes is bound (the bytes were checked)
+    assert_eq!(verify_saved(ours, Some((200, Some("W/\"w\""), ours))), V::Etag("W/\"w\"".into()));
+    // another writer got in between (even same size), or the read-back failed: never bound
+    assert_eq!(verify_saved(ours, Some((200, Some("\"x\""), b"project BYTES"))), V::Unbound);
+    assert_eq!(verify_saved(ours, Some((200, Some("\"x\""), b"other"))), V::Unbound);
+    assert_eq!(verify_saved(ours, Some((404, None, b""))), V::Unbound);
+    assert_eq!(verify_saved(ours, None), V::Unbound);
+    // HEAD failed after the move: the target is not read, the version is dropped
+    assert_eq!(saved_version(None, Some("\"p\""), None), V::Unbound);
 }

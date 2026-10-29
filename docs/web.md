@@ -168,7 +168,10 @@ Only a mount with `"writable": true` takes writes; saving to a read-only mount f
 Any other failure also leaves the project unsaved and shows the reason; the `.part` file is
 deleted on a best-effort basis. The ETag check is a `HEAD` before the `MOVE`: WebDAV has no atomic
 compare-and-move, so a change in the instant between the two is not caught. A server that sends
-no ETag cannot be checked.
+no ETag cannot be checked. After the move the saved version is recorded from the server's ETag; when
+the server gave the moved file a new ETag (some servers derive it from the modification time), the
+file is read back and the new ETag is recorded only if its bytes are the ones just uploaded, so
+the next save of the session goes ahead while a file another client wrote stays a conflict.
 
 ### Server setup
 
