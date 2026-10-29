@@ -53,6 +53,7 @@ pub struct Config {
 }
 
 impl Default for Config {
+    /// The defaults: no mounts, the standard list cache time.
     fn default() -> Self {
         Self { mounts: Vec::new(), list_cache_s: DEFAULT_LIST_CACHE_S }
     }
@@ -92,6 +93,7 @@ pub fn encode_segment(s: &str) -> String {
     out
 }
 
+/// Value of one ASCII hex digit.
 fn hex(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),

@@ -5,20 +5,24 @@ use crate::remote_dav::{MAX_ENTRIES, check_range_response, children_of, parse_co
 
 const ORIGIN: &str = "https://app.example";
 
+/// The test config: one mount at `/data`.
 fn cfg() -> Config {
     parse(br#"{"remote":{"mounts":[{"path":"/data","url":"/dav/"}]}}"#, ORIGIN, "/").unwrap()
 }
 
+/// One `d:response` element of a multistatus body.
 fn resp(href: &str, props: &str, status: &str) -> String {
     format!("<d:response><d:href>{href}</d:href><d:propstat><d:prop>{props}</d:prop><d:status>{status}</d:status></d:propstat></d:response>")
 }
 
+/// A multistatus document around `body`.
 fn multi(body: &str) -> String {
     format!(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{body}</d:multistatus>"#)
 }
 
 const DIR: &str = "<d:resourcetype><d:collection/></d:resourcetype>";
 
+/// Listing is parsed.
 #[test]
 fn listing_is_parsed() {
     let xml = multi(&[
@@ -38,6 +42,7 @@ fn listing_is_parsed() {
     assert_eq!(kids[0].path, "/data/clip 1.mp4");
 }
 
+/// Foreign deeper and traversing hrefs are dropped.
 #[test]
 fn foreign_deeper_and_traversing_hrefs_are_dropped() {
     let p = "<d:getcontentlength>1</d:getcontentlength>";
@@ -58,6 +63,7 @@ fn foreign_deeper_and_traversing_hrefs_are_dropped() {
     assert_eq!(kids[0].path, "/data/ok.mp4");
 }
 
+/// Bad properties are ignored not trusted.
 #[test]
 fn bad_properties_are_ignored_not_trusted() {
     let xml = multi(
@@ -73,6 +79,7 @@ fn bad_properties_are_ignored_not_trusted() {
     assert!(e.iter().all(|x| x.size.is_none() && x.modified.is_none()));
 }
 
+/// Malformed and hostile xml is an error.
 #[test]
 fn malformed_and_hostile_xml_is_an_error() {
     assert!(parse_multistatus(b"").is_err());
@@ -86,6 +93,7 @@ fn malformed_and_hostile_xml_is_an_error() {
     assert!(parse_multistatus(br#"<multistatus xmlns="urn:x"/>"#).is_err());
 }
 
+/// Entry count and body size are capped.
 #[test]
 fn entry_count_and_body_size_are_capped() {
     let body: String = (0..=MAX_ENTRIES).map(|i| resp(&format!("/dav/f{i}"), "", "HTTP/1.1 200 OK")).collect();
@@ -95,6 +103,7 @@ fn entry_count_and_body_size_are_capped() {
     assert!(parse_multistatus(&vec![b' '; (16 << 20) + 1]).is_err());
 }
 
+/// Http dates.
 #[test]
 fn http_dates() {
     assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:01 GMT"), Some(1));
@@ -103,6 +112,7 @@ fn http_dates() {
     assert_eq!(parse_http_date("nonsense"), None);
 }
 
+/// Content range parsing.
 #[test]
 fn content_range_parsing() {
     let r = parse_content_range("bytes 0-99/1000").unwrap();
@@ -113,6 +123,7 @@ fn content_range_parsing() {
     }
 }
 
+/// Ranged responses are validated.
 #[test]
 fn ranged_responses_are_validated() {
     let mib = 1 << 20;
@@ -137,6 +148,7 @@ fn ranged_responses_are_validated() {
     assert!(check_range_response(206, Some("bytes 0-0/0"), 0, mib, 0).is_err());
 }
 
+/// Metadata requests time out quickly and file transfers get a long cap.
 #[test]
 fn metadata_requests_time_out_quickly_and_file_transfers_get_a_long_cap() {
     use crate::remote_dav::timeout_ms;

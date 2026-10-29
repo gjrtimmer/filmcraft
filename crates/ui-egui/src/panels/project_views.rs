@@ -658,6 +658,7 @@ fn marquee(app: &mut FilmcraftApp, ui: &egui::Ui, v: &View, bg: &egui::Response,
     }
 }
 
+/// The context menu of the empty area of a bin or the project panel.
 fn background_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: Option<u64>, actions: &mut Actions) {
     let remote = app.hooks.remote.is_some();
     let mut entries = vec![

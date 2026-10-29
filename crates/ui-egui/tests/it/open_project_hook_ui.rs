@@ -6,6 +6,7 @@ use std::rc::Rc;
 use filmcraft_engine::Session;
 use filmcraft_ui_egui::FilmcraftApp;
 
+/// The host hook opens the project when set.
 #[test]
 fn the_host_hook_opens_the_project_when_set() {
     let mut app = FilmcraftApp::new(Session::default());
@@ -18,6 +19,7 @@ fn the_host_hook_opens_the_project_when_set() {
     assert!(app.session.path.is_none(), "the hook, not file.open, opens the project");
 }
 
+/// Without the hook file open runs.
 #[test]
 fn without_the_hook_file_open_runs() {
     let mut app = FilmcraftApp::new(Session::default());

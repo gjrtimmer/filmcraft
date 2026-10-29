@@ -52,6 +52,7 @@ pub fn save_target(dir: &str, name: &str) -> Result<String, String> {
     Ok(mb::join(dir, &name))
 }
 
+/// The remote mounts offered as volumes in the dialog.
 fn mounts(app: &FilmcraftApp) -> Vec<Volume> {
     app.session.services.volumes().into_iter().filter(|v| v.kind == VolumeKind::Network).collect()
 }

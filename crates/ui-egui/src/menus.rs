@@ -760,6 +760,7 @@ pub const MENUS: [&str; 9] = ["File", "Edit", "Clip", "Sequence", "Markers", "Gr
 /// the catalogs like menu labels (`apps/filmcraft/src/native_menu.rs`).
 pub const NATIVE_APP_MENU: [&str; 4] = ["Settings", "Hide FilmCraft", "Hide Others", "Quit FilmCraft"];
 
+/// All menu items with their enabled state for the current app state.
 pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
     let mut v = menu_items_for(&app.session);
     remote_entries(&mut v, app);

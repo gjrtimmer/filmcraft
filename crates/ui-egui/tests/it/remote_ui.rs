@@ -22,15 +22,19 @@ struct FakeRemote {
 }
 
 impl Services for FakeRemote {
+    /// Read file.
     fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
         Err(io::Error::new(io::ErrorKind::NotFound, path.to_string()))
     }
+    /// Write file.
     fn write_file(&self, _: &str, _: &[u8]) -> io::Result<()> {
         Ok(())
     }
+    /// Volumes.
     fn volumes(&self) -> Vec<Volume> {
         vec![Volume { name: "Server".into(), path: "/data".into(), kind: VolumeKind::Network }]
     }
+    /// List entries.
     fn list_entries(&self, dir: &str) -> Option<io::Result<Vec<DirEntry>>> {
         let file = |n: &str| DirEntry { name: n.into(), size: Some(10), ..Default::default() };
         match dir {
@@ -50,6 +54,7 @@ struct Driver {
 }
 
 impl Driver {
+    /// New.
     fn new(remote: bool) -> Self {
         let session = Session::new(Arc::new(FakeRemote { clips_calls: AtomicUsize::new(0) }));
         let (tx, rx) = channel();
@@ -72,6 +77,7 @@ impl Driver {
         d
     }
 
+    /// Frames.
     fn frames(&mut self, n: usize) {
         for _ in 0..n {
             let ctx = self.harness.ctx.clone();
@@ -82,6 +88,7 @@ impl Driver {
         }
     }
 
+    /// Call.
     fn call(&mut self, method: &str, params: Value) -> Value {
         let (req, reply) = ControlRequest::new(method, params.clone());
         self.tx.send(req).unwrap();
@@ -94,12 +101,14 @@ impl Driver {
         panic!("no reply to {method} {params}");
     }
 
+    /// Click.
     fn click(&mut self, id: &str) {
         let r = self.call("ui.click", json!({"id": id}));
         assert_eq!(r["ok"], true, "click {id}: {r}");
         self.frames(3);
     }
 
+    /// Has.
     fn has(&mut self, id: &str) -> bool {
         let v = self.call("ui.elements", json!({"prefix": id}));
         v["result"].as_array().unwrap().iter().any(|e| e["id"] == json!(id))
@@ -112,14 +121,17 @@ impl Driver {
     }
 }
 
+/// The label of menu item `id`, if present.
 fn label(menu: &[(String, String)], id: &str) -> Option<String> {
     menu.iter().find(|(i, _)| i == id).map(|(_, l)| l.clone())
 }
 
+/// The index of menu item `id`; panics when it is missing.
 fn position(menu: &[(String, String)], id: &str) -> usize {
     menu.iter().position(|(i, _)| i == id).unwrap_or_else(|| panic!("{id} not in the menu"))
 }
 
+/// Without remote storage the menu is unchanged.
 #[test]
 fn without_remote_storage_the_menu_is_unchanged() {
     let mut d = Driver::new(false);
@@ -134,6 +146,7 @@ fn without_remote_storage_the_menu_is_unchanged() {
     assert!(r["error"].as_str().unwrap().contains("remote storage is not configured"), "{r}");
 }
 
+/// With remote storage the local entries say local and remote ones follow.
 #[test]
 fn with_remote_storage_the_local_entries_say_local_and_remote_ones_follow() {
     let mut d = Driver::new(true);
@@ -152,6 +165,7 @@ fn with_remote_storage_the_local_entries_say_local_and_remote_ones_follow() {
     assert!(position(&m, "file.clearRecent") > position(&m, "file.openRemote"));
 }
 
+/// The remote dialog navigates waits for a loading folder and opens a project.
 #[test]
 fn the_remote_dialog_navigates_waits_for_a_loading_folder_and_opens_a_project() {
     let mut d = Driver::new(true);
@@ -171,6 +185,7 @@ fn the_remote_dialog_navigates_waits_for_a_loading_folder_and_opens_a_project() 
     assert!(!d.has("remoteDialog.accept"), "the dialog closed");
 }
 
+/// Cancel opens nothing and a second dialog is refused.
 #[test]
 fn cancel_opens_nothing_and_a_second_dialog_is_refused() {
     let mut d = Driver::new(true);
@@ -182,6 +197,7 @@ fn cancel_opens_nothing_and_a_second_dialog_is_refused() {
     assert!(!d.has("remoteDialog.cancel"));
 }
 
+/// Save names stay in the folder and get the project extension.
 #[test]
 fn save_names_stay_in_the_folder_and_get_the_project_extension() {
     assert_eq!(save_target("/data/a", "film").unwrap(), "/data/a/film.fcproj");
@@ -192,6 +208,7 @@ fn save_names_stay_in_the_folder_and_get_the_project_extension() {
     assert!(save_target("", "film").is_err());
 }
 
+/// Save as remote saves to the chosen path.
 #[test]
 fn save_as_remote_saves_to_the_chosen_path() {
     let mut d = Driver::new(true);
@@ -205,6 +222,7 @@ fn save_as_remote_saves_to_the_chosen_path() {
     assert!(path.is_some_and(|p| p.starts_with("/data/clips/")), "saved under the remote folder");
 }
 
+/// Imports of remote files go to the host first.
 #[test]
 fn imports_of_remote_files_go_to_the_host_first() {
     let mut d = Driver::new(true);
