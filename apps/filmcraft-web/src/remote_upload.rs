@@ -164,11 +164,12 @@ async fn upload_steps(cfg: &crate::remote_config::Config, origin: &str, path: &s
     if outcome == Outcome::Saved {
         // The version this save made: the move's own, else the target's when it is the upload's
         // (see `saved_version`). A follow-up HEAD alone could show another writer's version.
+        // `None`: the HEAD failed (not recorded as "no ETag"); `Some(None)`: it answered without one.
         let after = match send(&head, None).await {
-            Ok(r) if r.status() == 200 => header(&r, "etag"),
+            Ok(r) if r.status() == 200 => Some(header(&r, "etag")),
             _ => None,
         };
-        match rw::saved_version(moved_etag.as_deref(), part_etag.as_deref(), after.as_deref()) {
+        match rw::saved_version(moved_etag.as_deref(), part_etag.as_deref(), after.as_ref().map(Option::as_deref)) {
             rw::SavedVersion::Etag(e) => note_opened(path, Some(e)),
             rw::SavedVersion::NoEtag => note_opened(path, None),
             rw::SavedVersion::Unbound => forget_version(path),
