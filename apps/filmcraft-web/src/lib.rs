@@ -26,6 +26,8 @@ pub mod import;
 pub mod opfs;
 pub mod recovery;
 pub mod recovery_policy;
+pub mod remote_config;
+pub mod remote_dav;
 pub mod webcodecs;
 
 use std::cell::RefCell;
