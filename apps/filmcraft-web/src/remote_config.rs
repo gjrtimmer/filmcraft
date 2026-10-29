@@ -7,7 +7,9 @@
 //! {"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}],"listCacheSeconds":15}}
 //! ```
 //!
-//! `listCacheSeconds` is optional (default 15, clamped to 0..=3600).
+//! `listCacheSeconds` is optional (default 15, clamped to 0..=3600). `chunkBytes` (default 4 MiB,
+//! 256 KiB..=16 MiB) is the size of one `Range` read of remote media and `parallel` (default 12,
+//! 1..=32) how many chunks a sequential scan fetches at once.
 //!
 //! Pure (no browser types), so it runs natively in `tests/it`. Everything that comes from the
 //! config file, from a virtual path or from a server `href` is untrusted: paths with `..`, empty
@@ -31,6 +33,17 @@ pub const DEFAULT_LIST_CACHE_S: f64 = 15.0;
 /// Longest `remote.listCacheSeconds` accepted.
 pub const MAX_LIST_CACHE_S: f64 = 3600.0;
 
+/// Size of one `Range` read of remote media unless the config says otherwise (bytes).
+pub const DEFAULT_CHUNK_BYTES: u64 = 4 << 20;
+/// Smallest and largest `remote.chunkBytes` accepted.
+pub const MIN_CHUNK_BYTES: u64 = 256 << 10;
+pub const MAX_CHUNK_BYTES: u64 = 16 << 20;
+/// Chunks a sequential scan of a remote file fetches at once unless the config says otherwise.
+pub const DEFAULT_PARALLEL: usize = 12;
+/// Smallest and largest `remote.parallel` accepted.
+pub const MIN_PARALLEL: usize = 1;
+pub const MAX_PARALLEL: usize = 32;
+
 /// One server directory served under a virtual path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mount {
@@ -50,12 +63,16 @@ pub struct Config {
     /// Seconds a directory listing is reused (`remote.listCacheSeconds`, 0 to 3600; 0 fetches it
     /// again each time the folder is refreshed).
     pub list_cache_s: f64,
+    /// Bytes of one chunk of a remote file (`remote.chunkBytes`, 256 KiB to 16 MiB).
+    pub chunk_bytes: u64,
+    /// Chunks of a remote file fetched at once while it is scanned (`remote.parallel`, 1 to 32).
+    pub parallel: usize,
 }
 
 impl Default for Config {
     /// The defaults: no mounts, the standard list cache time.
     fn default() -> Self {
-        Self { mounts: Vec::new(), list_cache_s: DEFAULT_LIST_CACHE_S }
+        Self { mounts: Vec::new(), list_cache_s: DEFAULT_LIST_CACHE_S, chunk_bytes: DEFAULT_CHUNK_BYTES, parallel: DEFAULT_PARALLEL }
     }
 }
 
@@ -191,6 +208,14 @@ pub fn parse(bytes: &[u8], origin: &str, base_dir: &str) -> Result<Config, Strin
     // An optional number; any other type keeps the default, a number outside the range is clamped.
     if let Some(n) = v.get("remote").and_then(|r| r.get("listCacheSeconds")).and_then(Value::as_f64) {
         cfg.list_cache_s = n.clamp(0.0, MAX_LIST_CACHE_S);
+    }
+    // Optional numbers like the one above: another type keeps the default, a number outside the
+    // range is clamped (and a fraction rounded down).
+    if let Some(n) = v.get("remote").and_then(|r| r.get("chunkBytes")).and_then(Value::as_f64) {
+        cfg.chunk_bytes = (n.clamp(MIN_CHUNK_BYTES as f64, MAX_CHUNK_BYTES as f64) as u64).clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES);
+    }
+    if let Some(n) = v.get("remote").and_then(|r| r.get("parallel")).and_then(Value::as_f64) {
+        cfg.parallel = (n.clamp(MIN_PARALLEL as f64, MAX_PARALLEL as f64) as usize).clamp(MIN_PARALLEL, MAX_PARALLEL);
     }
     for m in mounts {
         let path = m

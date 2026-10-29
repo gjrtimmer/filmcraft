@@ -1,6 +1,11 @@
 mod download_pacing;
 mod recovery_policy;
 
+#[allow(dead_code)]
+#[path = "../../src/readahead.rs"]
+mod readahead;
+mod readahead_tests;
+
 // The pure remote-storage modules, included as the crate's own modules (the real crate is wasm32-only).
 #[allow(dead_code)]
 #[path = "../../src/remote_config.rs"]

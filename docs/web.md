@@ -122,6 +122,8 @@ Put `filmcraft-config.json` next to `index.html`:
 | `url` | The WebDAV collection: relative to the page (`dav/`), a path on the same site (`/dav/`) or an absolute URL on the page's own origin. Other origins are refused (no query-string override either). |
 | `name` | Name in the Media Browser (default: the last segment of `path`). |
 | `writable` | `true` allows saving to the mount. Default `false`: read-only. |
+| `remote.chunkBytes` | Optional, next to `mounts`: size of one `Range` read of remote media (bytes, default `4194304`, clamped to 262144 to 16777216). Local files stay at 1 MiB. Not a number: the default. |
+| `remote.parallel` | Optional, next to `mounts`: how many chunks of a remote file are fetched at once while it is scanned (default `12`, clamped to 1 to 32). Not a number: the default. |
 | `remote.listCacheSeconds` | Optional, next to `mounts`: how long a folder listing is reused before the server is asked again (seconds, default `15`, clamped to 0 to 3600; `0` revalidates every time the folder is refreshed). Not a number: the default. |
 
 At most 16 mounts. A missing, invalid or non-JSON file (a single-page app that answers 200 with
@@ -132,7 +134,11 @@ What it gives you:
 - Each mount is a **Network** location in the Media Browser. Listings are WebDAV `PROPFIND`
   (Depth 1), cached for `listCacheSeconds` (15 by default) and refreshed in the background; a folder that is still
   loading shows "Loading…" and fills in by itself.
-- Media is read with `Range` requests through the same 1 MiB chunk cache as local files. The server
+- Media is read with `Range` requests through the same chunk cache as local files (4 MiB chunks,
+  see `remote.chunkBytes`). Reads that miss at a frontier moving forward, such as a Matroska open
+  scanning every cluster header, fetch `remote.parallel` chunks ahead instead of three, and the
+  retries of an import run again as soon as a chunk arrives. Opening a remote project also loads the
+  container index of its WebM, Matroska and QuickTime media. The server
   must answer `206 Partial Content` with a matching `Content-Range`; a `200` full body is refused
   for media.
 - **File ▸ Open Remote Project…**, **Import from Remote…** and **Save As Remote…** (and the Home

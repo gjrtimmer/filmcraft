@@ -3,7 +3,7 @@
 //! - Media the user opens (`<input type=file>`, drag-and-drop, File System Access pickers, files
 //!   kept in OPFS) are registered as `File`/`Blob` entries under a virtual path (`/files/<name>`).
 //!   They are never copied whole: [`BlobReader`] serves the demuxers' range reads from a cache of
-//!   1 MiB chunks (LRU, [`CACHE_BUDGET`]), fetched asynchronously with `Blob.slice().arrayBuffer()`.
+//!   chunks (1 MiB for Blobs, `remote.chunkBytes` for remote files; LRU, [`CACHE_BUDGET`]), fetched asynchronously with `Blob.slice().arrayBuffer()`.
 //!   A read whose chunks are not cached yet starts the fetch (plus read-ahead) and fails with
 //!   `WouldBlock`, marking [`filmcraft_media::pending`]: the frame server and imports retry once
 //!   the bytes have arrived (the repaint hook wakes the UI).
@@ -24,8 +24,8 @@ use wasm_bindgen_futures::JsFuture;
 
 /// Chunk size of Blob range reads.
 pub const CHUNK: u64 = 1 << 20;
-/// Chunks fetched past the end of a read (sequential playback, demuxer scans).
-const READ_AHEAD: u64 = 3;
+/// Fetches of a Blob kept in flight while its container index is prefetched.
+const BLOB_PARALLEL: u64 = 8;
 /// Bytes of cached chunks kept (least recently used evicted).
 pub const CACHE_BUDGET: usize = 384 << 20;
 /// Largest Blob `read_file` will load whole (captions, interchange documents, projects).
@@ -50,6 +50,12 @@ struct Fs {
     blobs: HashMap<u32, web_sys::Blob>,
     /// Remote files by chunk-cache id: (virtual path, size).
     remote: HashMap<u32, (String, u64)>,
+    /// Chunk size of remote files by chunk-cache id (a Blob has [`CHUNK`]).
+    chunk_of: HashMap<u32, u64>,
+    /// Misses of each file, to tell a sequential scan from random reads.
+    scans: HashMap<u32, crate::readahead::Scan>,
+    /// Resolvers of [`next_data`] waits, called when a chunk arrives or fails.
+    waiters: Vec<js_sys::Function>,
     next_id: u32,
     chunks: HashMap<(u32, u64), (Arc<[u8]>, u64)>,
     bytes: usize,
@@ -110,7 +116,7 @@ pub fn register_blob(name: &str, blob: web_sys::Blob) -> String {
 }
 
 /// The chunk-cache id of the remote file at `path`; a new one when its size changed.
-fn register_remote(path: &str, size: u64) -> u32 {
+fn register_remote(path: &str, size: u64, chunk: u64) -> u32 {
     FS.with(|fs| {
         let mut fs = fs.borrow_mut();
         if let Some(Entry::Remote { id, size: s }) = fs.entries.get(path)
@@ -121,6 +127,7 @@ fn register_remote(path: &str, size: u64) -> u32 {
         let id = fs.next_id;
         fs.next_id += 1;
         fs.remote.insert(id, (path.to_string(), size));
+        fs.chunk_of.insert(id, chunk);
         fs.entries.insert(path.to_string(), Entry::Remote { id, size });
         id
     })
@@ -181,6 +188,17 @@ pub async fn idle() {
     }
 }
 
+/// Resolve when a chunk next arrives (or fails), or after `ms` milliseconds.
+pub async fn next_data(ms: i32) {
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        FS.with(|fs| fs.borrow_mut().waiters.push(resolve.clone()));
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = JsFuture::from(p).await;
+}
+
 /// Resolve after `ms` milliseconds.
 pub async fn sleep(ms: i32) {
     let p = js_sys::Promise::new(&mut |resolve, _| {
@@ -193,17 +211,22 @@ pub async fn sleep(ms: i32) {
 
 /// Load `[a, b)` of a registered Blob or remote file into the chunk cache (import prewarm: container index).
 pub async fn prefetch(path: &str, a: u64, b: u64) {
-    let Some((id, size)) = FS.with(|fs| match fs.borrow().entries.get(path) {
-        Some(Entry::Blob { id, size } | Entry::Remote { id, size }) => Some((*id, *size)),
-        _ => None,
+    let Some((id, size, chunk, limit)) = FS.with(|fs| {
+        let fs = fs.borrow();
+        match fs.entries.get(path) {
+            Some(Entry::Blob { id, size }) => Some((*id, *size, CHUNK, BLOB_PARALLEL)),
+            // a remote file: `remote.parallel` reads at once
+            Some(Entry::Remote { id, size }) => Some((*id, *size, fs.chunk_of.get(id).copied().unwrap_or(CHUNK), crate::remote::transfer().1)),
+            _ => None,
+        }
     }) else {
         return;
     };
-    let (c0, c1) = (a / CHUNK, b.min(size).div_ceil(CHUNK));
+    let (c0, c1) = (a / chunk, b.min(size).div_ceil(chunk));
     for c in c0..c1 {
         request(id, c);
         // keep a bounded number of reads in flight
-        while inflight() >= 8 {
+        while inflight() as u64 >= limit {
             sleep(2).await;
         }
     }
@@ -245,20 +268,20 @@ fn request(id: u32, c: u64) {
             return None;
         }
         let source = match (fs.blobs.get(&id), fs.remote.get(&id)) {
-            (Some(b), _) => Source::Blob(b.clone()),
-            (None, Some((p, s))) => Source::Remote(p.clone(), *s),
+            (Some(b), _) => (Source::Blob(b.clone()), CHUNK),
+            (None, Some((p, s))) => (Source::Remote(p.clone(), *s), fs.chunk_of.get(&id).copied().unwrap_or(CHUNK)),
             (None, None) => return None,
         };
         fs.failed.remove(&(id, c));
         fs.inflight.insert((id, c));
         Some(source)
     });
-    let Some(source) = source else { return };
+    let Some((source, chunk)) = source else { return };
     let size = match &source {
         Source::Blob(b) => b.size() as u64,
         Source::Remote(_, s) => *s,
     };
-    let (a, b) = (c * CHUNK, ((c + 1) * CHUNK).min(size));
+    let (a, b) = (c * chunk, ((c + 1) * chunk).min(size));
     wasm_bindgen_futures::spawn_local(async move {
         let r: Result<Vec<u8>, String> = match source {
             Source::Blob(blob) => match blob.slice_with_f64_and_f64(a as f64, b as f64) {
@@ -285,8 +308,13 @@ fn request(id: u32, c: u64) {
                     }
                 }
             }
-            fs.on_data.clone()
+            (fs.on_data.clone(), std::mem::take(&mut fs.waiters))
         });
+        let (wake, waiters) = wake;
+        // retries waiting for data run now, not after the slowest chunk or a fixed sleep
+        for resolve in waiters {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        }
         if let Some(w) = wake {
             w();
         }
@@ -297,6 +325,10 @@ fn request(id: u32, c: u64) {
 pub struct BlobReader {
     id: u32,
     size: u64,
+    /// Chunk size of this file's cache entries.
+    chunk: u64,
+    /// Chunks a sequential scan of this file fetches at once.
+    parallel: u64,
 }
 
 impl ByteReader for BlobReader {
@@ -311,8 +343,8 @@ impl ByteReader for BlobReader {
             .checked_add(buf.len() as u64)
             .filter(|e| *e <= self.size)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past end of file"))?;
-        let (c0, c1) = (offset / CHUNK, (end - 1) / CHUNK);
-        let last = (self.size.max(1) - 1) / CHUNK;
+        let (c0, c1) = (offset / self.chunk, (end - 1) / self.chunk);
+        let last = (self.size.max(1) - 1) / self.chunk;
         let missing: Vec<u64> = FS.with(|fs| {
             let fs = fs.borrow();
             (c0..=c1).filter(|c| !fs.chunks.contains_key(&(self.id, *c))).collect()
@@ -321,7 +353,15 @@ impl ByteReader for BlobReader {
             return Err(io::Error::other(format!("file read failed: {e}")));
         }
         if !missing.is_empty() {
-            for c in missing.iter().copied().chain(c1 + 1..=(c1 + READ_AHEAD).min(last)) {
+            // misses at a frontier that moves forward are a sequential scan (a demuxer opening the
+            // file, retried from its start): fetch many chunks at once
+            let ahead = FS.with(|fs| {
+                let mut fs = fs.borrow_mut();
+                let scan = fs.scans.entry(self.id).or_default();
+                scan.note_miss(missing[0], self.parallel);
+                crate::readahead::ahead(scan, self.parallel, self.chunk, CACHE_BUDGET)
+            });
+            for c in missing.iter().copied().chain(c1 + 1..=(c1 + ahead).min(last)) {
                 request(self.id, c);
             }
             return Err(filmcraft_media::pending::would_block());
@@ -335,7 +375,7 @@ impl ByteReader for BlobReader {
                 // Present (checked above); evicted in between would be a bug, reported as an error.
                 let Some((d, used)) = fs.chunks.get_mut(&(self.id, c)) else { return false };
                 *used = t;
-                let a = if c == c0 { (offset - c * CHUNK) as usize } else { 0 };
+                let a = if c == c0 { (offset - c * self.chunk) as usize } else { 0 };
                 let n = (d.len() - a).min(buf.len() - pos);
                 buf[pos..pos + n].copy_from_slice(&d[a..a + n]);
                 pos += n;
@@ -345,8 +385,11 @@ impl ByteReader for BlobReader {
         if !complete {
             return Err(filmcraft_media::pending::would_block());
         }
-        // read-ahead for sequential access
-        for c in c1 + 1..=(c1 + READ_AHEAD).min(last) {
+        // read-ahead for sequential access (as wide as the scan that was seen on this file)
+        let ahead = FS.with(|fs| {
+            fs.borrow().scans.get(&self.id).map_or(crate::readahead::BASE_AHEAD, |s| crate::readahead::ahead(s, self.parallel, self.chunk, CACHE_BUDGET))
+        });
+        for c in c1 + 1..=(c1 + ahead).min(last) {
             request(self.id, c);
         }
         Ok(())
@@ -364,7 +407,9 @@ impl WebServices {
     /// Open a reader over the in-memory entry at `path`, or the error the engine shows.
     fn entry_reader(path: &str) -> io::Result<SharedReader> {
         let local = FS.with(|fs| match fs.borrow().entries.get(path) {
-            Some(Entry::Blob { id, size }) => Some(Ok(Arc::new(BlobReader { id: *id, size: *size }) as SharedReader)),
+            Some(Entry::Blob { id, size }) => {
+                Some(Ok(Arc::new(BlobReader { id: *id, size: *size, chunk: CHUNK, parallel: crate::readahead::BASE_AHEAD }) as SharedReader))
+            }
             Some(Entry::Mem(b)) => Some(Ok(Arc::new(MemReader(b.clone())) as SharedReader)),
             Some(Entry::Remote { .. }) | None => None,
         });
@@ -376,7 +421,10 @@ impl WebServices {
         // retries on the repaint); one the server does not have is not found.
         match crate::remote::lookup(path) {
             Some(crate::remote::Lookup::Found(st)) if st.is_dir => Err(io::Error::other(format!("{path}: is a directory"))),
-            Some(crate::remote::Lookup::Found(st)) => Ok(Arc::new(BlobReader { id: register_remote(path, st.size), size: st.size }) as SharedReader),
+            Some(crate::remote::Lookup::Found(st)) => {
+                let (chunk, parallel) = crate::remote::transfer();
+                Ok(Arc::new(BlobReader { id: register_remote(path, st.size, chunk), size: st.size, chunk, parallel }) as SharedReader)
+            }
             Some(crate::remote::Lookup::Loading) => Err(filmcraft_media::pending::would_block()),
             Some(crate::remote::Lookup::Missing) | None => Err(not_found(path)),
         }
