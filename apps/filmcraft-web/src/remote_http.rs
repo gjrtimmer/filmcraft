@@ -61,15 +61,28 @@ pub(crate) fn header(r: &web_sys::Response, name: &str) -> Option<String> {
     r.headers().get(name).ok().flatten()
 }
 
-/// The body, refused before reading when `Content-Length` exceeds `cap` and after when it does.
+/// The body, refused before reading when `Content-Length` exceeds `cap` and while reading as soon
+/// as the bytes received exceed it, so a listing without (or with a false) length cannot fill memory.
 pub(crate) async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u8>, String> {
     if header(r, "content-length").and_then(|h| remote_dav::parse_content_length(&h)).is_some_and(|n| n > cap as u64) {
         return Err("response too large".into());
     }
-    let buf = JsFuture::from(r.array_buffer().map_err(js_err)?).await.map_err(js_err)?;
-    let a = js_sys::Uint8Array::new(&buf);
-    if a.length() as usize > cap {
-        return Err("response too large".into());
+    // no body (e.g. 204): empty
+    let Some(stream) = r.body() else { return Ok(Vec::new()) };
+    let reader: web_sys::ReadableStreamDefaultReader = stream.get_reader().unchecked_into();
+    let mut out = Vec::new();
+    loop {
+        let chunk = JsFuture::from(reader.read()).await.map_err(js_err)?;
+        if js_sys::Reflect::get(&chunk, &"done".into()).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
+            return Ok(out);
+        }
+        let value = js_sys::Reflect::get(&chunk, &"value".into()).map_err(js_err)?;
+        let part = js_sys::Uint8Array::new(&value);
+        if out.len().saturating_add(part.length() as usize) > cap {
+            // stop the transfer: nothing more is read
+            let _ = reader.cancel();
+            return Err("response too large".into());
+        }
+        out.extend_from_slice(&part.to_vec());
     }
-    Ok(a.to_vec())
 }

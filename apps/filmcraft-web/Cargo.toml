@@ -77,6 +77,8 @@ web-sys = { version = "0.3", features = [
     "OffscreenCanvas",
     "OffscreenCanvasRenderingContext2d",
     "Performance",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
     "Request",
     "RequestCache",
     "RequestInit",
