@@ -104,6 +104,85 @@ eframe creates a WebGPU device when the browser has one, else WebGL2. FilmCraft'
 (`filmcraft-gpu`) is used on WebGPU; on WebGL2 frames are composited on the CPU. Check
 `filmcraft.info().backend` and `.compositor`.
 
+## Remote storage
+
+The page can mount folders of a WebDAV server as virtual paths, so projects and media live on a
+server instead of being picked from the local disk. Without the config file below nothing
+changes: the app behaves as before and no remote menu entries appear.
+
+Put `filmcraft-config.json` next to `index.html`:
+
+```json
+{"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}]}}
+```
+
+| Field | |
+|---|---|
+| `path` | Virtual path of the mount (`/data`). Absolute, no `..`; it may not be `/files`, `/projects`, `/exports`, `/opfs` or `/recovered`, and mounts may not overlap. |
+| `url` | The WebDAV collection: relative to the page (`dav/`), a path on the same site (`/dav/`) or an absolute URL on the page's own origin. Other origins are refused (no query-string override either). |
+| `name` | Name in the Media Browser (default: the last segment of `path`). |
+| `writable` | `true` allows saving to the mount. Default `false`: read-only. |
+
+At most 16 mounts. A missing, invalid or non-JSON file (a single-page app that answers 200 with
+its index page, for example) turns the feature off and logs one line.
+
+What it gives you:
+
+- Each mount is a **Network** location in the Media Browser. Listings are WebDAV `PROPFIND`
+  (Depth 1), cached for 15 seconds and refreshed in the background; a folder that is still
+  loading shows "Loading…" and fills in by itself.
+- Media is read with `Range` requests through the same 1 MiB chunk cache as local files. The server
+  must answer `206 Partial Content` with a matching `Content-Range`; a `200` full body is refused
+  for media.
+- **File ▸ Open Remote Project…**, **Import from Remote…** and **Save As Remote…** (and the Home
+  cards and the Project panel menu) open the remote dialog. The local entries are then labelled
+  "Local". Right-click a project in the Media Browser for **Open Project…**; double-click is
+  unchanged.
+- A project opened from a mount first fetches the sizes of the media it refers to (a listing of
+  each folder, `HEAD` as fallback), because the engine's file services are synchronous. Media
+  the server does not list show as offline. `filmcraft.openProject("/data/a.fcproj")` does the
+  same from JavaScript. A recovered snapshot re-checks its remote media the same way.
+- Everything a server sends is treated as untrusted: capped body and listing sizes, hrefs outside
+  the mount dropped, malformed XML, ranges and sizes refused.
+
+### Saving
+
+Only a mount with `"writable": true` takes writes; saving to a read-only mount fails with a message
+(use Save As to another place). Saving is a background upload:
+
+1. the project is uploaded to `<name>.fcproj.part` in the same folder (the old file stays whole);
+2. the target's ETag is compared with the one seen when the project was opened (or last saved).
+   If another editor changed it meanwhile (for example the headless MCP on the same project),
+   nothing is overwritten: the status line says "Project changed on the server; use Save As" and
+   the project stays unsaved;
+3. the `.part` file is moved over the target (`MOVE`, `Overwrite: T`; `Overwrite: F` when the
+   file is new, so an existing file is never replaced silently).
+
+Any other failure also leaves the project unsaved and shows the reason; the `.part` file is
+deleted on a best-effort basis. The ETag check is a `HEAD` before the `MOVE`: WebDAV has no atomic
+compare-and-move, so a change in the instant between the two is not caught. A server that sends
+no ETag cannot be checked.
+
+### Server setup
+
+Any WebDAV server on the page's origin works if it supports `PROPFIND`, `Range` GETs and (for
+writable mounts) `PUT`, `MOVE` and ETags. Serve the app and the DAV folder from one origin, for
+example with nginx in front:
+
+```nginx
+location /filmcraft/ { root /srv/www; }                    # the static app + filmcraft-config.json
+location /filmcraft/dav/ {
+    proxy_pass http://127.0.0.1:8080/;                     # a WebDAV server
+    proxy_set_header Host $host;
+    client_max_body_size 64m;                              # saved projects
+}
+```
+
+with, for example, `rclone serve webdav /srv/films --addr 127.0.0.1:8080 --read-only` for a
+read-only mount (leave `--read-only` off, and set `"writable": true`, to save), or Apache with
+`mod_dav` and `mod_dav_fs` (`Dav On` on the folder). The server's own access control applies;
+the browser sends the page's cookies and HTTP authentication as for any same-origin request.
+
 ## `window.filmcraft`: the agent / test API
 
 The control channel of the desktop app (`docs/control-protocol.md`) as promises. Results resolve
@@ -118,7 +197,7 @@ with the method's `result`, errors reject.
 | `filmcraft.screenshot(params)` | `{pngBase64, width, height}` of the canvas (or `{panel}`) |
 | `filmcraft.importFiles(files)` | import `File` / `FileList` / `File[]`; resolves `{items, errors, paths}` |
 | `filmcraft.importUrl(url, name?)` | fetch a URL and import it (tests) |
-| `filmcraft.openProject(fileOrUrl)` | open a `.fcproj` |
+| `filmcraft.openProject(fileOrUrl)` | open a `.fcproj`: a File, a URL, or a path on a remote mount (see [Remote storage](#remote-storage)) |
 | `filmcraft.files()` | the virtual files: `{path, size, kind}` |
 | `filmcraft.readFile(path)` | a file's bytes (`Uint8Array`), e.g. an export |
 | `filmcraft.info()` | backend, compositor, isolation, OPFS, WebCodecs support and counters, start-up time |
