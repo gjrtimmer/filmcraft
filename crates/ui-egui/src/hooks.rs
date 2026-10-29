@@ -61,6 +61,11 @@ pub struct HostHooks {
     /// from remote storage, with the sizes of its media, before `file.open`). Called by
     /// [`FilmcraftApp::open_project_path`]; without it the path opens with `file.open` directly.
     pub open_project: Option<Box<dyn FnMut(&str)>>,
+    /// Run an import command (`mediaBrowser.import`, `mediaBrowser.openInSource`, `file.import`
+    /// with its params, `paths` resolved) the host has to prepare for first (the web build fetches
+    /// remote files, and retries the import while their bytes load). Returns whether the host
+    /// took the command over and runs it itself later; `false` runs it as usual.
+    pub import_command: Option<Box<dyn FnMut(&str, &Value) -> bool>>,
     /// The host has remote storage (the web build with a `filmcraft-config.json`): File ▸ Open
     /// Remote Project…, Import from Remote… and the remote dialog appear, and the local entries
     /// say "Local". `None` (desktop): the menus are unchanged.

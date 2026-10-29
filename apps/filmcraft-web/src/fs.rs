@@ -191,10 +191,10 @@ pub async fn sleep(ms: i32) {
     let _ = JsFuture::from(p).await;
 }
 
-/// Load `[a, b)` of a registered Blob into the chunk cache (import prewarm: container index).
+/// Load `[a, b)` of a registered Blob or remote file into the chunk cache (import prewarm: container index).
 pub async fn prefetch(path: &str, a: u64, b: u64) {
     let Some((id, size)) = FS.with(|fs| match fs.borrow().entries.get(path) {
-        Some(Entry::Blob { id, size }) => Some((*id, *size)),
+        Some(Entry::Blob { id, size } | Entry::Remote { id, size }) => Some((*id, *size)),
         _ => None,
     }) else {
         return;
@@ -371,10 +371,13 @@ impl WebServices {
             return r;
         }
         // A remote file: its size comes from the listing/HEAD cache (a changed size is a new file).
-        match crate::remote::stat(path) {
-            Some(st) if st.is_dir => Err(io::Error::other(format!("{path}: is a directory"))),
-            Some(st) => Ok(Arc::new(BlobReader { id: register_remote(path, st.size), size: st.size }) as SharedReader),
-            None => Err(not_found(path)),
+        // A path the cache does not know yet starts a fetch and reads as "loading" (the caller
+        // retries on the repaint); one the server does not have is not found.
+        match crate::remote::lookup(path) {
+            Some(crate::remote::Lookup::Found(st)) if st.is_dir => Err(io::Error::other(format!("{path}: is a directory"))),
+            Some(crate::remote::Lookup::Found(st)) => Ok(Arc::new(BlobReader { id: register_remote(path, st.size), size: st.size }) as SharedReader),
+            Some(crate::remote::Lookup::Loading) => Err(filmcraft_media::pending::would_block()),
+            Some(crate::remote::Lookup::Missing) | None => Err(not_found(path)),
         }
     }
 }

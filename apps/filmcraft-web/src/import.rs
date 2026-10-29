@@ -36,7 +36,7 @@ fn be32(b: &[u8]) -> u64 {
 }
 
 /// Load what opening the file will read first: the container index.
-async fn prewarm(path: &str, size: u64) {
+pub(crate) async fn prewarm(path: &str, size: u64) {
     let head_len = size.min(64 << 10);
     fs::prefetch(path, 0, head_len).await;
     let Ok(head) = fs::WebServices.read_range(path, 0, head_len as usize) else { return };

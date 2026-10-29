@@ -136,3 +136,13 @@ fn ranged_responses_are_validated() {
     assert!(check_range_response(206, Some("bytes 0-1/2"), 10, mib, 2).is_err());
     assert!(check_range_response(206, Some("bytes 0-0/0"), 0, mib, 0).is_err());
 }
+
+#[test]
+fn metadata_requests_time_out_quickly_and_file_transfers_get_a_long_cap() {
+    use crate::remote_dav::timeout_ms;
+    for m in ["PROPFIND", "HEAD", "MOVE", "DELETE"] {
+        assert_eq!(timeout_ms(m), 20_000, "{m}");
+    }
+    assert_eq!(timeout_ms("GET"), 300_000);
+    assert_eq!(timeout_ms("PUT"), 300_000);
+}

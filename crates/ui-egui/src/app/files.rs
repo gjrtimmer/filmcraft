@@ -23,12 +23,29 @@ impl FilmcraftApp {
         r
     }
 
+    /// Offer an import command to [`HostHooks::import_command`]; `Some` when the host took it.
+    pub(crate) fn host_import(&mut self, id: &str, params: &Value) -> Option<Value> {
+        let mut resolved = params.clone();
+        if resolved.get("paths").is_none() {
+            let paths = match params.get("path").and_then(Value::as_str) {
+                Some(p) => vec![p.to_string()],
+                None => self.session.browser.selection.clone(),
+            };
+            resolved["paths"] = json!(paths);
+        }
+        let taken = self.hooks.import_command.as_mut().is_some_and(|hook| hook(id, &resolved));
+        taken.then(|| json!({"pending": true}))
+    }
+
     /// Import the files a picker (local or remote) returned into `bin` (default: the shown bin).
     pub(crate) fn import_picked(&mut self, bin: Option<Value>, paths: Vec<String>) -> Result<Value, String> {
         if paths.is_empty() {
             return Ok(Value::Null);
         }
         let bin = bin.unwrap_or_else(|| json!(self.import_bin().0));
+        if let Some(r) = self.host_import("file.import", &json!({"paths": paths, "bin": bin})) {
+            return Ok(r);
+        }
         let r = self.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
         if let Ok(v) = &r
             && let Some(errs) = v.get("errors").and_then(Value::as_array)

@@ -7,6 +7,15 @@
 
 use crate::remote_config::{Config, Mount};
 
+/// How long a remote request may take before it is aborted (milliseconds): metadata requests are
+/// short; GET and PUT move file data and get a generous total cap.
+pub fn timeout_ms(method: &str) -> i32 {
+    match method {
+        "GET" | "PUT" => 300_000,
+        _ => 20_000,
+    }
+}
+
 /// Largest PROPFIND answer read (bytes).
 pub const MAX_XML_BYTES: usize = 16 << 20;
 /// Most entries of one directory listing.
