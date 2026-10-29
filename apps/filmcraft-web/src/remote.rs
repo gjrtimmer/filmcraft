@@ -14,11 +14,10 @@ use std::io;
 
 use filmcraft_engine::media_browser::{DirEntry, Volume, VolumeKind};
 use serde_json::{Value, json};
-use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::remote_config::{self, Config};
 use crate::remote_dav::{self, Child};
+pub(crate) use crate::remote_http::{fetch, fetch_within, header, read_body};
 use crate::remote_lookup::{Lookups, Next, Outcome};
 
 /// A failed listing is not retried for this long (seconds).
@@ -88,60 +87,6 @@ pub fn stat(path: &str) -> Option<Stat> {
     STATE.with(|s| s.borrow().stats.get(path.strip_suffix('/').unwrap_or(path)).cloned())
 }
 
-/// Text of a JavaScript error value.
-pub(crate) fn js_err(e: wasm_bindgen::JsValue) -> String {
-    let aborted = js_sys::Reflect::get(&e, &"name".into()).ok().and_then(|n| n.as_string()).is_some_and(|n| n == "AbortError");
-    if aborted { "the server did not answer in time".to_string() } else { format!("{e:?}") }
-}
-
-/// Send one request with the page's credentials and a timeout; the response of any status, or the failure text.
-pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<web_sys::Response, String> {
-    let init = web_sys::RequestInit::new();
-    init.set_method(method);
-    // Same origin only: a redirect elsewhere fails instead of leaking the request.
-    init.set_mode(web_sys::RequestMode::SameOrigin);
-    init.set_cache(web_sys::RequestCache::NoCache);
-    let h = web_sys::Headers::new().map_err(js_err)?;
-    for (k, v) in headers {
-        h.set(k, v).map_err(js_err)?;
-    }
-    init.set_headers(&h);
-    // Every request is aborted when it takes too long (the timer also covers reading the body; a
-    // request that already finished ignores it), so nothing waits on a server that went quiet.
-    let ctl = web_sys::AbortController::new().map_err(js_err)?;
-    init.set_signal(Some(&ctl.signal()));
-    let win = web_sys::window().ok_or("no window")?;
-    let timer = wasm_bindgen::closure::Closure::once_into_js({
-        let ctl = ctl.clone();
-        move || ctl.abort()
-    });
-    win.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), remote_dav::timeout_ms(method)).map_err(js_err)?;
-    if let Some(b) = body {
-        init.set_body(&js_sys::Uint8Array::from(b));
-    }
-    let req = web_sys::Request::new_with_str_and_init(url, &init).map_err(js_err)?;
-    let resp = JsFuture::from(win.fetch_with_request(&req)).await.map_err(js_err)?;
-    resp.dyn_into::<web_sys::Response>().map_err(|_| "fetch did not return a Response".to_string())
-}
-
-/// A response header's value, `None` when absent.
-pub(crate) fn header(r: &web_sys::Response, name: &str) -> Option<String> {
-    r.headers().get(name).ok().flatten()
-}
-
-/// The body, refused before reading when `Content-Length` exceeds `cap` and after when it does.
-pub(crate) async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u8>, String> {
-    if header(r, "content-length").and_then(|h| remote_dav::parse_content_length(&h)).is_some_and(|n| n > cap as u64) {
-        return Err("response too large".into());
-    }
-    let buf = JsFuture::from(r.array_buffer().map_err(js_err)?).await.map_err(js_err)?;
-    let a = js_sys::Uint8Array::new(&buf);
-    if a.length() as usize > cap {
-        return Err("response too large".into());
-    }
-    Ok(a.to_vec())
-}
-
 /// The remote config and the page origin, or why remote storage is unavailable.
 pub(crate) fn cfg_and_origin() -> Result<(Config, String), String> {
     STATE.with(|s| {
@@ -173,12 +118,14 @@ pub async fn load_config() {
     }
 }
 
-/// PROPFIND `dir` (Depth 1) and map the answer to virtual paths.
-async fn propfind(dir: &str) -> Result<Vec<Child>, String> {
+/// PROPFIND `dir` (Depth 1) and map the answer to virtual paths; the request is aborted when
+/// `deadline` passes.
+async fn propfind(dir: &str, deadline: Option<web_time::Instant>) -> Result<Vec<Child>, String> {
     let (cfg, origin) = cfg_and_origin()?;
     let mount = cfg.mount_for(dir).ok_or_else(|| format!("{dir}: not on a remote mount"))?.clone();
     let url = cfg.url_for(&format!("{}/", dir.trim_end_matches('/')))?;
-    let r = fetch("PROPFIND", &url, &[("Depth", "1"), ("Content-Type", "application/xml")], Some(remote_dav::PROPFIND_BODY.as_bytes())).await?;
+    let hdrs = [("Depth", "1"), ("Content-Type", "application/xml")];
+    let r = fetch_within("PROPFIND", &url, &hdrs, Some(remote_dav::PROPFIND_BODY.as_bytes()), deadline).await?;
     if r.status() != 207 {
         return Err(format!("{dir}: the server answered {} to a listing", r.status()));
     }
@@ -220,7 +167,7 @@ fn record_dir(dir: &str, res: Result<Vec<Child>, String>) {
 /// Start the listing of `dir` unless one is already running.
 fn start_listing(dir: String) {
     wasm_bindgen_futures::spawn_local(async move {
-        let res = propfind(&dir).await;
+        let res = propfind(&dir, None).await;
         record_dir(&dir, res);
         crate::repaint();
     });
@@ -271,7 +218,13 @@ enum StatError {
 /// A file's size: cached, else from its parent's listing, else `HEAD`. A 404 is remembered, so a
 /// file that is not there reads as missing and is not asked about again at once.
 pub async fn ensure_stat(path: &str) -> Result<Stat, String> {
-    let r = fetch_stat(path).await;
+    ensure_stat_until(path, None).await
+}
+
+/// [`ensure_stat`] whose requests (listing, `HEAD`) are aborted when `deadline` passes, and that
+/// stops waiting for another lookup's listing then.
+pub async fn ensure_stat_until(path: &str, deadline: Option<web_time::Instant>) -> Result<Stat, String> {
+    let r = fetch_stat(path, deadline).await;
     let outcome = match &r {
         Ok(_) => Outcome::Found,
         Err(StatError::Absent(_)) => Outcome::Absent,
@@ -295,8 +248,9 @@ fn listing_fresh(dir: &str) -> bool {
     })
 }
 
-/// Size and kind of `path`: from the cache, else the parent folder's listing, else a `HEAD`.
-async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
+/// Size and kind of `path`: from the cache, else the parent folder's listing, else a `HEAD`;
+/// every request is bound by `deadline`.
+async fn fetch_stat(path: &str, deadline: Option<web_time::Instant>) -> Result<Stat, StatError> {
     let other = StatError::Other;
     if let Some(s) = stat(path) {
         return Ok(s);
@@ -304,14 +258,14 @@ async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
     if let Some(parent) = remote_config::parent(path) {
         // one listing per folder: a lookup that finds it running waits for it
         for _ in 0..500 {
-            if !STATE.with(|s| s.borrow().dirs.get(parent).is_some_and(|d| d.loading)) {
+            if !STATE.with(|s| s.borrow().dirs.get(parent).is_some_and(|d| d.loading)) || deadline.is_some_and(|d| web_time::Instant::now() >= d) {
                 break;
             }
             crate::fs::sleep(10).await;
         }
         if stat(path).is_none() && !listing_fresh(parent) {
             STATE.with(|s| s.borrow_mut().dirs.entry(parent.to_string()).or_default().loading = true);
-            let res = propfind(parent).await;
+            let res = propfind(parent, deadline).await;
             if let Err(e) = &res {
                 log::info!("listing {parent}: {e}");
             }
@@ -322,7 +276,8 @@ async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
         }
     }
     let (cfg, _) = cfg_and_origin().map_err(other)?;
-    let r = fetch("HEAD", &cfg.url_for(path).map_err(StatError::Other)?, &[], None).await.map_err(StatError::Other)?;
+    let url = cfg.url_for(path).map_err(StatError::Other)?;
+    let r = fetch_within("HEAD", &url, &[], None, deadline).await.map_err(StatError::Other)?;
     match r.status() {
         200 => {}
         404 | 410 => return Err(StatError::Absent(format!("{path}: not found on the server"))),
