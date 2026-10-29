@@ -30,6 +30,8 @@ pub mod recovery_policy;
 pub mod remote;
 pub mod remote_config;
 pub mod remote_dav;
+pub mod remote_import;
+pub mod remote_lookup;
 pub mod remote_roots;
 pub mod remote_upload;
 pub mod remote_write;
@@ -203,7 +205,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 }
                 let mut app = FilmcraftApp::new(session);
                 import::install_hooks(&mut app);
-                remote::install_hooks(&mut app);
+                remote_import::install_hooks(&mut app);
                 // Settings ▸ General ▸ Interface Language ▸ System Language (#218): the browser's languages.
                 app.hooks.system_languages =
                     Some(Box::new(|| web_sys::window().map(|w| w.navigator().languages().iter().filter_map(|v| v.as_string()).collect()).unwrap_or_default()));

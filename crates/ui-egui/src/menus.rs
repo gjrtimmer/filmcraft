@@ -594,6 +594,11 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         app.session.set_prefs(next).map_err(|e| e.to_string())?;
         return Ok(Value::Null);
     }
+    if matches!(id, "mediaBrowser.import" | "mediaBrowser.openInSource")
+        && let Some(r) = app.host_import(id, &params)
+    {
+        return Ok(r);
+    }
     if let Some(r) = crate::panels::remote_dialog::command(app, id, &params) {
         if let Err(e) = &r {
             app.ui.status = e.clone();

@@ -16,6 +16,10 @@ mod remote_config_tests;
 mod remote_dav;
 mod remote_dav_tests;
 #[allow(dead_code)]
+#[path = "../../src/remote_lookup.rs"]
+mod remote_lookup;
+mod remote_lookup_tests;
+#[allow(dead_code)]
 #[path = "../../src/remote_roots.rs"]
 mod remote_roots;
 #[allow(dead_code)]

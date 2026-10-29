@@ -19,13 +19,12 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::remote_config::{self, Config};
 use crate::remote_dav::{self, Child};
+use crate::remote_lookup::{Lookups, Next, Outcome};
 
 /// A failed listing is not retried for this long (seconds).
 const ERROR_RETRY_S: f64 = 5.0;
 /// Entries kept in the stat cache.
 const STAT_MAX: usize = 200_000;
-/// Media paths of one project whose sizes are fetched before it opens.
-const MEDIA_MAX: usize = 10_000;
 /// Largest config file read.
 const CONFIG_MAX: usize = 64 * 1024;
 
@@ -54,6 +53,7 @@ struct State {
     origin: String,
     stats: HashMap<String, Stat>,
     dirs: HashMap<String, DirState>,
+    lookups: Lookups,
 }
 
 thread_local! {
@@ -88,7 +88,8 @@ pub fn stat(path: &str) -> Option<Stat> {
 }
 
 pub(crate) fn js_err(e: wasm_bindgen::JsValue) -> String {
-    format!("{e:?}")
+    let aborted = js_sys::Reflect::get(&e, &"name".into()).ok().and_then(|n| n.as_string()).is_some_and(|n| n == "AbortError");
+    if aborted { "the server did not answer in time".to_string() } else { format!("{e:?}") }
 }
 
 pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<web_sys::Response, String> {
@@ -102,11 +103,20 @@ pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], bod
         h.set(k, v).map_err(js_err)?;
     }
     init.set_headers(&h);
+    // Every request is aborted when it takes too long (the timer also covers reading the body; a
+    // request that already finished ignores it), so nothing waits on a server that went quiet.
+    let ctl = web_sys::AbortController::new().map_err(js_err)?;
+    init.set_signal(Some(&ctl.signal()));
+    let win = web_sys::window().ok_or("no window")?;
+    let timer = wasm_bindgen::closure::Closure::once_into_js({
+        let ctl = ctl.clone();
+        move || ctl.abort()
+    });
+    win.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), remote_dav::timeout_ms(method)).map_err(js_err)?;
     if let Some(b) = body {
         init.set_body(&js_sys::Uint8Array::from(b));
     }
     let req = web_sys::Request::new_with_str_and_init(url, &init).map_err(js_err)?;
-    let win = web_sys::window().ok_or("no window")?;
     let resp = JsFuture::from(win.fetch_with_request(&req)).await.map_err(js_err)?;
     resp.dyn_into::<web_sys::Response>().map_err(|_| "fetch did not return a Response".to_string())
 }
@@ -116,7 +126,7 @@ pub(crate) fn header(r: &web_sys::Response, name: &str) -> Option<String> {
 }
 
 /// The body, refused before reading when `Content-Length` exceeds `cap` and after when it does.
-async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u8>, String> {
+pub(crate) async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u8>, String> {
     if header(r, "content-length").and_then(|h| remote_dav::parse_content_length(&h)).is_some_and(|n| n > cap as u64) {
         return Err("response too large".into());
     }
@@ -242,7 +252,8 @@ pub fn list(dir: &str) -> Option<io::Result<Vec<DirEntry>>> {
         st.shown |= st.entries.is_some();
         let result = match (&st.entries, &st.error) {
             (Some(e), _) => Ok(e.clone()),
-            (None, Some((msg, at))) if now - at < ERROR_RETRY_S => Err(io::Error::other(msg.clone())),
+            // the error stays until a retry succeeds: no flicker between it and "Loading"
+            (None, Some((msg, _))) => Err(io::Error::other(msg.clone())),
             _ => Err(io::Error::new(io::ErrorKind::WouldBlock, "Loading…")),
         };
         (result, start)
@@ -253,30 +264,103 @@ pub fn list(dir: &str) -> Option<io::Result<Vec<DirEntry>>> {
     Some(result)
 }
 
-/// A file's size: cached, else from its parent's listing, else `HEAD`.
+/// Why a stat could not be had.
+enum StatError {
+    /// The server has no such file.
+    Absent(String),
+    Other(String),
+}
+
+/// A file's size: cached, else from its parent's listing, else `HEAD`. A 404 is remembered, so a
+/// file that is not there reads as missing and is not asked about again at once.
 pub async fn ensure_stat(path: &str) -> Result<Stat, String> {
+    let r = fetch_stat(path).await;
+    let outcome = match &r {
+        Ok(_) => Outcome::Found,
+        Err(StatError::Absent(_)) => Outcome::Absent,
+        Err(StatError::Other(_)) => Outcome::Failed,
+    };
+    let now = now_s();
+    STATE.with(|s| s.borrow_mut().lookups.done(path, outcome, now));
+    r.map_err(|e| match e {
+        StatError::Absent(m) | StatError::Other(m) => m,
+    })
+}
+
+async fn fetch_stat(path: &str) -> Result<Stat, StatError> {
+    let other = StatError::Other;
     if let Some(s) = stat(path) {
         return Ok(s);
     }
     if let Some(parent) = remote_config::parent(path) {
-        let res = propfind(parent).await;
-        if let Err(e) = &res {
-            log::info!("listing {parent}: {e}");
+        // one listing per folder: a lookup that finds it running waits for it
+        for _ in 0..500 {
+            if !STATE.with(|s| s.borrow().dirs.get(parent).is_some_and(|d| d.loading)) {
+                break;
+            }
+            crate::fs::sleep(10).await;
         }
-        record_dir(parent, res);
+        if stat(path).is_none() {
+            STATE.with(|s| s.borrow_mut().dirs.entry(parent.to_string()).or_default().loading = true);
+            let res = propfind(parent).await;
+            if let Err(e) = &res {
+                log::info!("listing {parent}: {e}");
+            }
+            record_dir(parent, res);
+        }
         if let Some(s) = stat(path) {
             return Ok(s);
         }
     }
-    let (cfg, _) = cfg_and_origin()?;
-    let r = fetch("HEAD", &cfg.url_for(path)?, &[], None).await?;
-    if r.status() != 200 {
-        return Err(format!("{path}: the server answered {}", r.status()));
+    let (cfg, _) = cfg_and_origin().map_err(other)?;
+    let r = fetch("HEAD", &cfg.url_for(path).map_err(StatError::Other)?, &[], None).await.map_err(StatError::Other)?;
+    match r.status() {
+        200 => {}
+        404 | 410 => return Err(StatError::Absent(format!("{path}: not found on the server"))),
+        n => return Err(StatError::Other(format!("{path}: the server answered {n}"))),
     }
-    let size = header(&r, "content-length").and_then(|h| remote_dav::parse_content_length(&h)).ok_or_else(|| format!("{path}: the server gave no size"))?;
+    let size = header(&r, "content-length")
+        .and_then(|h| remote_dav::parse_content_length(&h))
+        .ok_or_else(|| StatError::Other(format!("{path}: the server gave no size")))?;
     let s = Stat { size, is_dir: false, modified: None, etag: header(&r, "etag") };
     STATE.with(|st| st.borrow_mut().stats.insert(path.to_string(), s.clone()));
     Ok(s)
+}
+
+/// What a synchronous look at a remote file found.
+pub enum Lookup {
+    Found(Stat),
+    /// Being fetched: the caller answers "loading" and is asked again after the repaint.
+    Loading,
+    Missing,
+}
+
+/// The stat of a file on a remote mount for the synchronous `Services`; `None` for other paths.
+/// A path the cache does not know starts one deduplicated fetch (listing of its folder, else
+/// `HEAD`) and repaints when it ends; a path the server does not have is `Missing`, not `Loading`.
+pub fn lookup(path: &str) -> Option<Lookup> {
+    if !is_remote(path) {
+        return None;
+    }
+    if let Some(s) = stat(path) {
+        return Some(Lookup::Found(s));
+    }
+    let now = now_s();
+    let next = STATE.with(|s| s.borrow_mut().lookups.miss(path, now));
+    Some(match next {
+        Next::Missing => Lookup::Missing,
+        Next::Wait => Lookup::Loading,
+        Next::Fetch => {
+            let path = path.to_string();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = ensure_stat(&path).await {
+                    log::info!("remote file {path}: {e}");
+                }
+                crate::repaint();
+            });
+            Lookup::Loading
+        }
+    })
 }
 
 /// Bytes `[start, start + len)` of a file of known `size`, as a validated `206` answer.
@@ -295,44 +379,22 @@ pub async fn fetch_range(path: &str, start: u64, len: u64, size: u64) -> Result<
     Ok(body)
 }
 
-/// The media (and proxy) file paths a project file refers to.
-fn media_paths(bytes: &[u8]) -> Vec<String> {
-    let Ok(loaded) = filmcraft_format::decode(bytes) else { return Vec::new() };
-    let mut out = Vec::new();
-    for it in loaded.project.items.values() {
-        let Some(m) = it.as_media() else { continue };
-        for r in std::iter::once(&m.media).chain(m.proxy.as_ref()) {
-            if let filmcraft_engine::project::MediaRef::File { path } = r {
-                out.push(path.clone());
-            }
-        }
-    }
-    out
-}
-
 /// Drop what is cached about `path` and its folder (after it was written): the next look asks again.
 pub fn forget(path: &str) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.stats.remove(path);
+        s.lookups.forget(path);
         if let Some(p) = remote_config::parent(path) {
             s.dirs.remove(p);
         }
     });
 }
 
-/// Fetch the size of every remote file a project (its bytes) refers to, so the synchronous
-/// `Services` find them when it opens. Missing ones stay missing: the engine reports them offline.
-pub async fn prefetch_media(project: &[u8]) {
-    for p in media_paths(project).into_iter().filter(|p| is_remote(p)).take(MEDIA_MAX) {
-        if let Err(e) = ensure_stat(&p).await {
-            log::info!("remote media {p}: {e}");
-        }
-    }
-}
-
 /// Open the project at a remote path: fetch it, fetch the sizes of its media, then `file.open`.
 pub async fn open_project(path: &str) -> Result<Value, String> {
+    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+    crate::post(move |w, _| w.app.status(format!("Opening {name}…")));
     let st = ensure_stat(path).await?;
     if st.is_dir || st.size > remote_dav::MAX_PROJECT_BYTES {
         return Err(format!("{path}: not a project file this size can open"));
@@ -344,31 +406,8 @@ pub async fn open_project(path: &str) -> Result<Value, String> {
     }
     crate::remote_upload::note_opened(path, header(&r, "etag"));
     let bytes = read_body(&r, remote_dav::MAX_PROJECT_BYTES as usize).await?;
-    prefetch_media(&bytes).await;
+    crate::remote_import::prefetch_media(&bytes).await;
     crate::fs::put(path, bytes);
     let path = path.to_string();
     crate::import::on_ui(move |w, _| w.app.session.execute("file.open", json!({"path": path})).map_err(|e| e.to_string())).await
-}
-
-/// Route "open project by path" through the remote fetch (Media Browser, Open Recent, Home).
-pub fn install_hooks(app: &mut filmcraft_ui_egui::FilmcraftApp) {
-    if !enabled() {
-        return;
-    }
-    let name = STATE.with(|s| s.borrow().cfg.as_ref().and_then(|c| c.mounts.first()).map(|m| m.name.clone())).unwrap_or_default();
-    app.hooks.remote = Some(filmcraft_ui_egui::RemoteInfo { name });
-    app.hooks.open_project = Some(Box::new(|path: &str| {
-        let path = path.to_string();
-        wasm_bindgen_futures::spawn_local(async move {
-            let r = if is_remote(&path) {
-                open_project(&path).await
-            } else {
-                let p = path.clone();
-                crate::import::on_ui(move |w, _| w.app.session.execute("file.open", json!({"path": p})).map_err(|e| e.to_string())).await
-            };
-            if let Err(e) = r {
-                crate::post(move |w, _| w.app.status(e));
-            }
-        });
-    }));
 }

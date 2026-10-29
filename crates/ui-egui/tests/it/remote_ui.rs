@@ -46,6 +46,7 @@ struct Driver {
     harness: Harness<'static, FilmcraftApp>,
     tx: Sender<ControlRequest>,
     opened: Rc<RefCell<Vec<String>>>,
+    imports: Rc<RefCell<Vec<(String, Value)>>>,
 }
 
 impl Driver {
@@ -54,13 +55,19 @@ impl Driver {
         let (tx, rx) = channel();
         let mut app = FilmcraftApp::new(session).with_control(rx);
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+        let imports: Rc<RefCell<Vec<(String, Value)>>> = Rc::default();
         if remote {
+            let i = imports.clone();
+            app.hooks.import_command = Some(Box::new(move |id, p| {
+                i.borrow_mut().push((id.to_string(), p.clone()));
+                p["paths"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("/data/"))))
+            }));
             app.hooks.remote = Some(RemoteInfo { name: "Server".into() });
             let o = opened.clone();
             app.hooks.open_project = Some(Box::new(move |p| o.borrow_mut().push(p.to_string())));
         }
         let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
-        let mut d = Driver { harness, tx, opened };
+        let mut d = Driver { harness, tx, opened, imports };
         d.frames(4);
         d
     }
@@ -196,4 +203,23 @@ fn save_as_remote_saves_to_the_chosen_path() {
     d.click("remoteDialog.accept");
     let path = d.harness.state_mut().session.path.clone();
     assert!(path.is_some_and(|p| p.starts_with("/data/clips/")), "saved under the remote folder");
+}
+
+#[test]
+fn imports_of_remote_files_go_to_the_host_first() {
+    let mut d = Driver::new(true);
+    // the host takes a remote path over: nothing is imported by the command itself
+    let r = d.call("ui.menu.invoke", json!({"id": "mediaBrowser.import", "params": {"paths": ["/data/clip.mp4"]}}));
+    assert_eq!(r["result"]["pending"], true, "{r}");
+    // the selection is resolved into `paths` for the host
+    d.harness.state_mut().session.browser.selection = vec!["/data/one.fcproj".into()];
+    let r = d.call("ui.menu.invoke", json!({"id": "mediaBrowser.import"}));
+    assert_eq!(r["result"]["pending"], true, "{r}");
+    let seen = d.imports.borrow().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].0, "mediaBrowser.import");
+    assert_eq!(seen[1].1["paths"], json!(["/data/one.fcproj"]));
+    // a local path is left to the command (the host answers false)
+    d.call("ui.menu.invoke", json!({"id": "mediaBrowser.import", "params": {"paths": ["/local/a.mp4"]}}));
+    assert_eq!(d.imports.borrow().len(), 3);
 }
