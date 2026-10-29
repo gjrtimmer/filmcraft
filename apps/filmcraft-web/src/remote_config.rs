@@ -4,8 +4,10 @@
 //! The page fetches `./filmcraft-config.json` at start-up:
 //!
 //! ```json
-//! {"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}]}}
+//! {"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}],"listCacheSeconds":15}}
 //! ```
+//!
+//! `listCacheSeconds` is optional (default 15, clamped to 0..=3600).
 //!
 //! Pure (no browser types), so it runs natively in `tests/it`. Everything that comes from the
 //! config file, from a virtual path or from a server `href` is untrusted: paths with `..`, empty
@@ -13,6 +15,8 @@
 //! lie under the mount's URL never maps to a path.
 
 use serde_json::Value;
+
+use crate::remote_roots::RESERVED_ROOTS;
 
 /// Mounts accepted from one config file.
 pub const MAX_MOUNTS: usize = 16;
@@ -22,8 +26,10 @@ pub const MAX_PATH: usize = 4096;
 pub const MAX_SEGMENTS: usize = 128;
 /// Longest display name of a mount (bytes).
 const MAX_NAME: usize = 64;
-/// Roots of the virtual file table: a mount may not shadow them.
-const RESERVED: [&str; 5] = ["files", "projects", "exports", "opfs", "recovered"];
+/// Seconds a directory listing is reused before it is fetched again, unless the config says otherwise.
+pub const DEFAULT_LIST_CACHE_S: f64 = 15.0;
+/// Longest `remote.listCacheSeconds` accepted.
+pub const MAX_LIST_CACHE_S: f64 = 3600.0;
 
 /// One server directory served under a virtual path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,13 +40,22 @@ pub struct Mount {
     pub url_path: String,
     /// Display name in the Media Browser.
     pub name: String,
-    /// Accepted for forward compatibility; remote files are read-only in this version.
+    /// Whether the app may save to this mount; a read-only mount refuses every write before a request is made.
     pub writable: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub mounts: Vec<Mount>,
+    /// Seconds a directory listing is reused (`remote.listCacheSeconds`, 0 to 3600; 0 fetches it
+    /// again each time the folder is refreshed).
+    pub list_cache_s: f64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { mounts: Vec::new(), list_cache_s: DEFAULT_LIST_CACHE_S }
+    }
 }
 
 /// A segment (or whole path) that cannot name a file safely.
@@ -171,13 +186,17 @@ pub fn parse(bytes: &[u8], origin: &str, base_dir: &str) -> Result<Config, Strin
         return Err("too many mounts".into());
     }
     let mut cfg = Config::default();
+    // An optional number; any other type keeps the default, a number outside the range is clamped.
+    if let Some(n) = v.get("remote").and_then(|r| r.get("listCacheSeconds")).and_then(Value::as_f64) {
+        cfg.list_cache_s = n.clamp(0.0, MAX_LIST_CACHE_S);
+    }
     for m in mounts {
         let path = m
             .get("path")
             .and_then(Value::as_str)
             .and_then(normalize_virtual)
             .ok_or("mount.path must be an absolute path with no empty, `.` or `..` segments")?;
-        if path.split('/').nth(1).is_some_and(|first| RESERVED.contains(&first)) {
+        if path.split('/').nth(1).is_some_and(|first| RESERVED_ROOTS.contains(&first)) {
             return Err(format!("mount path {path} shadows a built-in folder"));
         }
         if cfg.mounts.iter().any(|o| o.path == path || o.path.starts_with(&format!("{path}/")) || path.starts_with(&format!("{}/", o.path))) {
