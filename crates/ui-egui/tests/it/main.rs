@@ -50,6 +50,7 @@ mod playback_clock_ui;
 mod project_panel_ui;
 mod properties_scroll_ui;
 mod remix_ui;
+mod remote_ui;
 mod scripted;
 mod sequence_tabs_ui;
 mod sequence_ui;

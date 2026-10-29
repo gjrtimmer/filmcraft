@@ -136,6 +136,9 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("tool.zoom", "Zoom Tool", [], Some("Z")),
     uic!("tool.type", "Type Tool", [], Some("T")),
     uic!("tool.verticalType", "Vertical Type Tool", [], None),
+    uic!("file.openRemote", "Open Remote Project…", [], None),
+    uic!("file.importRemote", "Import from Remote…", [], None),
+    uic!("file.saveAsRemote", "Save As Remote…", [], None),
     uic!("mode.import", "Import", [], None),
     uic!("mode.edit", "Edit", [], None),
     uic!("mode.export", "Export", ["File", "Export"], Some("Cmd+M")),
@@ -591,6 +594,12 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         app.session.set_prefs(next).map_err(|e| e.to_string())?;
         return Ok(Value::Null);
     }
+    if let Some(r) = crate::panels::remote_dialog::command(app, id, &params) {
+        if let Err(e) = &r {
+            app.ui.status = e.clone();
+        }
+        return r;
+    }
     // File dialogs for commands that need a path.
     if (id == "file.import" && params.get("paths").is_none() && params.get("path").is_none())
         || (id == "file.importImageSequence" && params.get("path").is_none())
@@ -748,6 +757,7 @@ pub const NATIVE_APP_MENU: [&str; 4] = ["Settings", "Hide FilmCraft", "Hide Othe
 
 pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
     let mut v = menu_items_for(&app.session);
+    remote_entries(&mut v, app);
     for it in &mut v {
         it.label = app.ui.language.tr(&it.label).to_string();
         match it.id.as_str() {
@@ -775,11 +785,38 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
     v
 }
 
+/// With remote storage (`HostHooks::remote`): the local File entries say "Local" and the remote
+/// ones follow them. Without it the menu is left as it is.
+fn remote_entries(items: &mut Vec<MenuItem>, app: &FilmcraftApp) {
+    if app.hooks.remote.is_none() {
+        return;
+    }
+    for (local, label, remote) in [
+        ("file.open", "Open Local Project…", Some(("file.openRemote", "Open Remote Project…"))),
+        ("file.import", "Import Local…", Some(("file.importRemote", "Import from Remote…"))),
+        ("file.importImageSequence", "Import Local Image Sequence…", None),
+        ("file.saveAs", "Save As…", Some(("file.saveAsRemote", "Save As Remote…"))),
+    ] {
+        let Some(at) = items.iter().position(|it| it.id == local) else { continue };
+        if local != "file.saveAs" {
+            items[at].label = label.into();
+        }
+        if let Some((id, label)) = remote {
+            let path = items[at].path.clone();
+            items.insert(
+                at + 1,
+                MenuItem { id: id.into(), label: label.into(), path, shortcut: app.session.shortcuts.primary(id), enabled: true, checked: None },
+            );
+        }
+    }
+}
+
 /// File ▸ Open Recent, after Open Project…: the recent projects (General ▸ `recentProjects`),
 /// newest first, then Clear Recent Files. Clear is always there, so the submenu exists (in the
 /// native menu too, built once at launch) before the first project is saved.
 fn open_recent(items: &mut Vec<MenuItem>, session: &filmcraft_engine::Session, tr: impl Fn(&str) -> String) {
-    let Some(at) = items.iter().position(|it| it.id == "file.open") else { return };
+    // after Open Remote Project… when the host has one
+    let Some(at) = items.iter().position(|it| it.id == "file.openRemote").or_else(|| items.iter().position(|it| it.id == "file.open")) else { return };
     let path: Vec<String> = vec!["File".into(), "Open Recent".into()];
     let recent = &session.prefs.general.recent_projects;
     let mut sub: Vec<MenuItem> = recent
