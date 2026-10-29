@@ -113,7 +113,7 @@ changes: the app behaves as before and no remote menu entries appear.
 Put `filmcraft-config.json` next to `index.html`:
 
 ```json
-{"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}]}}
+{"remote":{"mounts":[{"path":"/data","url":"dav/","name":"Server","writable":false}],"listCacheSeconds":15}}
 ```
 
 | Field | |
@@ -122,6 +122,7 @@ Put `filmcraft-config.json` next to `index.html`:
 | `url` | The WebDAV collection: relative to the page (`dav/`), a path on the same site (`/dav/`) or an absolute URL on the page's own origin. Other origins are refused (no query-string override either). |
 | `name` | Name in the Media Browser (default: the last segment of `path`). |
 | `writable` | `true` allows saving to the mount. Default `false`: read-only. |
+| `remote.listCacheSeconds` | Optional, next to `mounts`: how long a folder listing is reused before the server is asked again (seconds, default `15`, clamped to 0 to 3600; `0` revalidates every time the folder is refreshed). Not a number: the default. |
 
 At most 16 mounts. A missing, invalid or non-JSON file (a single-page app that answers 200 with
 its index page, for example) turns the feature off and logs one line.
@@ -129,7 +130,7 @@ its index page, for example) turns the feature off and logs one line.
 What it gives you:
 
 - Each mount is a **Network** location in the Media Browser. Listings are WebDAV `PROPFIND`
-  (Depth 1), cached for 15 seconds and refreshed in the background; a folder that is still
+  (Depth 1), cached for `listCacheSeconds` (15 by default) and refreshed in the background; a folder that is still
   loading shows "Loading…" and fills in by itself.
 - Media is read with `Range` requests through the same 1 MiB chunk cache as local files. The server
   must answer `206 Partial Content` with a matching `Content-Range`; a `200` full body is refused
@@ -172,16 +173,27 @@ example with nginx in front:
 ```nginx
 location /filmcraft/ { root /srv/www; }                    # the static app + filmcraft-config.json
 location /filmcraft/dav/ {
-    proxy_pass http://127.0.0.1:8080/;                     # a WebDAV server
-    proxy_set_header Host $host;
-    client_max_body_size 64m;                              # saved projects
+    proxy_pass http://127.0.0.1:8080;                      # a WebDAV server; no URI here, the prefix is kept
+    proxy_set_header Host $http_host;                      # the Destination of a MOVE names this host
+    client_max_body_size 0;                                # saved projects, no limit
+    proxy_request_buffering off;
 }
 ```
 
-with, for example, `rclone serve webdav /srv/films --addr 127.0.0.1:8080 --read-only` for a
-read-only mount (leave `--read-only` off, and set `"writable": true`, to save), or Apache with
-`mod_dav` and `mod_dav_fs` (`Dav On` on the folder). The server's own access control applies;
-the browser sends the page's cookies and HTTP authentication as for any same-origin request.
+with, for example, `rclone serve webdav /srv/films --addr 127.0.0.1:8080 --baseurl /filmcraft/dav`
+(add `--read-only` for a read-only mount), or Apache with `mod_dav` and `mod_dav_fs` (`Dav On` on
+the folder). The server's own access control applies; the browser sends the page's cookies and HTTP
+authentication as for any same-origin request.
+
+Three rules keep saving working:
+
+- The proxy must not strip the location prefix: write `proxy_pass http://127.0.0.1:8080;` without
+  a trailing `/` or path. With `proxy_pass http://…:8080/;` the server sees paths without the
+  prefix, but the `Destination` header of the `MOVE` that finishes a save still carries it, so the
+  save fails.
+- `rclone --baseurl` equals the location prefix (`/filmcraft/dav`), and the mount's `url` is that
+  same prefix: relative to the page (`dav/`) or absolute (`/filmcraft/dav/`).
+- `--read-only` on the server goes with `"writable": false` in the config, and the other way round.
 
 ## `window.filmcraft`: the agent / test API
 
