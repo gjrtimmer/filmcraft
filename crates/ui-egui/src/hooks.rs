@@ -43,6 +43,12 @@ pub struct AudioDevices {
     pub output_channels: u16,
 }
 
+/// What the host's remote storage is called.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteInfo {
+    pub name: String,
+}
+
 /// Host hooks for native file dialogs etc.
 #[derive(Default)]
 pub struct HostHooks {
@@ -55,6 +61,10 @@ pub struct HostHooks {
     /// from remote storage, with the sizes of its media, before `file.open`). Called by
     /// [`FilmcraftApp::open_project_path`]; without it the path opens with `file.open` directly.
     pub open_project: Option<Box<dyn FnMut(&str)>>,
+    /// The host has remote storage (the web build with a `filmcraft-config.json`): File ▸ Open
+    /// Remote Project…, Import from Remote… and the remote dialog appear, and the local entries
+    /// say "Local". `None` (desktop): the menus are unchanged.
+    pub remote: Option<RemoteInfo>,
     /// Save dialog with a filter: (filter name, extensions, suggested file name) → path. The
     /// suggestion may be a full path, and the dialog then starts in its folder.
     pub pick_save_as: Option<Box<dyn FnMut(&str, &[&str], &str) -> Option<String>>>,

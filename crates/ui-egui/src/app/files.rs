@@ -23,6 +23,22 @@ impl FilmcraftApp {
         r
     }
 
+    /// Import the files a picker (local or remote) returned into `bin` (default: the shown bin).
+    pub(crate) fn import_picked(&mut self, bin: Option<Value>, paths: Vec<String>) -> Result<Value, String> {
+        if paths.is_empty() {
+            return Ok(Value::Null);
+        }
+        let bin = bin.unwrap_or_else(|| json!(self.import_bin().0));
+        let r = self.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
+        if let Ok(v) = &r
+            && let Some(errs) = v.get("errors").and_then(Value::as_array)
+            && !errs.is_empty()
+        {
+            self.ui.status = errs.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ");
+        }
+        r
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {
@@ -34,20 +50,7 @@ impl FilmcraftApp {
                     .copied()
                     .collect();
                 let bin = params.get("bin").cloned();
-                self.pick(FileDialog::open_files(&exts), move |app, paths| {
-                    if paths.is_empty() {
-                        return Ok(Value::Null);
-                    }
-                    let bin = bin.unwrap_or_else(|| json!(app.import_bin().0));
-                    let r = app.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
-                    if let Ok(v) = &r
-                        && let Some(errs) = v.get("errors").and_then(Value::as_array)
-                        && !errs.is_empty()
-                    {
-                        app.ui.status = errs.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ");
-                    }
-                    r
-                })
+                self.pick(FileDialog::open_files(&exts), move |app, paths| app.import_picked(bin, paths))
             }
             // File ▸ Import with Image Sequence: choose the first numbered still
             "file.importImageSequence" => self.pick(FileDialog::open_files(filmcraft_media::STILL_EXTENSIONS), |app, paths| {

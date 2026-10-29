@@ -87,11 +87,11 @@ pub fn stat(path: &str) -> Option<Stat> {
     STATE.with(|s| s.borrow().stats.get(path.strip_suffix('/').unwrap_or(path)).cloned())
 }
 
-fn js_err(e: wasm_bindgen::JsValue) -> String {
+pub(crate) fn js_err(e: wasm_bindgen::JsValue) -> String {
     format!("{e:?}")
 }
 
-async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&str>) -> Result<web_sys::Response, String> {
+pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<web_sys::Response, String> {
     let init = web_sys::RequestInit::new();
     init.set_method(method);
     // Same origin only: a redirect elsewhere fails instead of leaking the request.
@@ -103,7 +103,7 @@ async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&
     }
     init.set_headers(&h);
     if let Some(b) = body {
-        init.set_body(&wasm_bindgen::JsValue::from_str(b));
+        init.set_body(&js_sys::Uint8Array::from(b));
     }
     let req = web_sys::Request::new_with_str_and_init(url, &init).map_err(js_err)?;
     let win = web_sys::window().ok_or("no window")?;
@@ -111,7 +111,7 @@ async fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&
     resp.dyn_into::<web_sys::Response>().map_err(|_| "fetch did not return a Response".to_string())
 }
 
-fn header(r: &web_sys::Response, name: &str) -> Option<String> {
+pub(crate) fn header(r: &web_sys::Response, name: &str) -> Option<String> {
     r.headers().get(name).ok().flatten()
 }
 
@@ -128,7 +128,7 @@ async fn read_body(r: &web_sys::Response, cap: usize) -> Result<Vec<u8>, String>
     Ok(a.to_vec())
 }
 
-fn cfg_and_origin() -> Result<(Config, String), String> {
+pub(crate) fn cfg_and_origin() -> Result<(Config, String), String> {
     STATE.with(|s| {
         let s = s.borrow();
         s.cfg.clone().map(|c| (c, s.origin.clone())).ok_or_else(|| "remote storage is not configured".to_string())
@@ -163,7 +163,7 @@ async fn propfind(dir: &str) -> Result<Vec<Child>, String> {
     let (cfg, origin) = cfg_and_origin()?;
     let mount = cfg.mount_for(dir).ok_or_else(|| format!("{dir}: not on a remote mount"))?.clone();
     let url = cfg.url_for(&format!("{}/", dir.trim_end_matches('/')))?;
-    let r = fetch("PROPFIND", &url, &[("Depth", "1"), ("Content-Type", "application/xml")], Some(remote_dav::PROPFIND_BODY)).await?;
+    let r = fetch("PROPFIND", &url, &[("Depth", "1"), ("Content-Type", "application/xml")], Some(remote_dav::PROPFIND_BODY.as_bytes())).await?;
     if r.status() != 207 {
         return Err(format!("{dir}: the server answered {} to a listing", r.status()));
     }
@@ -296,6 +296,17 @@ fn media_paths(bytes: &[u8]) -> Vec<String> {
     out
 }
 
+/// Drop what is cached about `path` and its folder (after it was written): the next look asks again.
+pub fn forget(path: &str) {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.stats.remove(path);
+        if let Some(p) = remote_config::parent(path) {
+            s.dirs.remove(p);
+        }
+    });
+}
+
 /// Fetch the size of every remote file a project (its bytes) refers to, so the synchronous
 /// `Services` find them when it opens. Missing ones stay missing: the engine reports them offline.
 pub async fn prefetch_media(project: &[u8]) {
@@ -329,6 +340,8 @@ pub fn install_hooks(app: &mut filmcraft_ui_egui::FilmcraftApp) {
     if !enabled() {
         return;
     }
+    let name = STATE.with(|s| s.borrow().cfg.as_ref().and_then(|c| c.mounts.first()).map(|m| m.name.clone())).unwrap_or_default();
+    app.hooks.remote = Some(filmcraft_ui_egui::RemoteInfo { name });
     app.hooks.open_project = Some(Box::new(|path: &str| {
         let path = path.to_string();
         wasm_bindgen_futures::spawn_local(async move {
