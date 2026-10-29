@@ -389,6 +389,10 @@ impl Services for WebServices {
     }
 
     fn write_file(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        // a path on a remote mount: uploaded to the server (writable mounts) or refused (read-only)
+        if let Some(r) = crate::remote_upload::write(path, data) {
+            return r;
+        }
         if let Some(rel) = path.strip_prefix("/opfs/") {
             crate::opfs::write(rel.to_string(), data.to_vec());
         }
@@ -406,6 +410,9 @@ impl Services for WebServices {
     }
 
     fn write_file_new(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        if crate::remote::is_remote(path) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive creation on remote storage is unavailable"));
+        }
         if path.starts_with("/opfs/") {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive OPFS writes are unavailable"));
         }
